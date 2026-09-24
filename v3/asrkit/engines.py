@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import glob
 import os
+import re
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
@@ -378,13 +379,16 @@ class NemoEngine(Engine):
         out = []
         for h in hyps:
             text = getattr(h, "text", h if isinstance(h, str) else "") or ""
+            # 辞書に無い音は「⁇」(SentencePiece の unk)で出てくるので消す
+            text = core.fix_ja_spaces(re.sub(r"\s*⁇\s*", " ", text)).strip() if "⁇" in text else text
             ts = getattr(h, "timestamp", None) or {}
             words = None
             unit = ts.get("word") if isinstance(ts, dict) else None
             if unit and " " in text.strip() and len(unit) > 1:  # 空白で区切る言語は単語単位
                 words = [[u.get("word", ""), float(u.get("start", 0)), float(u.get("end", 0))] for u in unit]
             elif isinstance(ts, dict) and ts.get("char"):  # 日本語などは文字単位
-                words = [[u.get("char", ""), float(u.get("start", 0)), float(u.get("end", 0))] for u in ts["char"]]
+                words = [[u.get("char", ""), float(u.get("start", 0)), float(u.get("end", 0))] for u in ts["char"]
+                         if "⁇" not in str(u.get("char", ""))]
             out.append({"text": text, "language": "", "words": words})
         return out
 

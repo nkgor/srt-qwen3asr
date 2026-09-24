@@ -364,3 +364,8 @@ def test_negation_check():
     assert core.negation_check(ref, ref) == (2, 2, 0)
     assert core.negation_check(ref, "今日は行く。雨は降りません。") == (1, 2, 0)  # 「行かない」→「行く」(意味が反転)
     assert core.negation_check("明日は行く。", "明日は行かない。") == (0, 0, 1)  # 正解に無い否定が出た
+
+
+def test_join_texts():
+    assert core.join_texts(["今日は", " 晴れ。", "", "Claude", "Code を使う"]) == "今日は晴れ。Claude Code を使う"
+    assert core.join_texts([]) == ""

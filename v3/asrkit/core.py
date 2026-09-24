@@ -592,6 +592,18 @@ def approx_tokens(text: str, start: float, end: float, speech: Sequence[Tuple[fl
     return out
 
 
+def join_texts(parts: Sequence[str]) -> str:
+    """区切って読んだ本文をつなぐ(英数字どうしの間だけ空白を入れる)"""
+    out = ""
+    for t in (p.strip() for p in parts):
+        if not t:
+            continue
+        if out and out[-1].isascii() and out[-1].isalnum() and t[0].isascii() and t[0].isalnum():
+            out += " "
+        out += t
+    return out
+
+
 def fix_ja_spaces(s: str) -> str:
     """日本語の文字どうしの間の余計な空白を消す(英単語の間の空白は残す)"""
     return _JA_SPACE.sub("", s)
@@ -1567,10 +1579,14 @@ def review_items(results: Sequence[ClipResult]) -> List[ClipResult]:
 
 
 def _attempt_line(a: Dict[str, Any]) -> str:
-    src = f"別モデル {a['model']}" if "model" in a else ("context あり" if a.get("ctx") else "context なし")
+    if "model" in a:
+        src = f"別モデル {a['model']}" + (f"・{a['pieces']} つに区切って" if a.get("pieces") else "")
+    else:
+        src = "context あり" if a.get("ctx") else "context なし"
     fl = a.get("flags") or []
     mark = f"  ⚠ {'、'.join(FLAG_JA.get(f, f) for f in fl)}" if fl else ""
-    return f"  - 候補({src}): {a['text'][:400] or '(空)'}{mark}"
+    rej = f"  （不採用: {a['rejected']}）" if a.get("rejected") else ""
+    return f"  - 候補({src}): {a['text'][:400] or '(空)'}{mark}{rej}"
 
 
 def to_review_md(results: Sequence[ClipResult], title: str) -> str:

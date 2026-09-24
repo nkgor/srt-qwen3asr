@@ -464,7 +464,8 @@ class Session:
         return aligned
 
     def _second_opinion(self, results: List[core.ClipResult], w: core.Wav16, wav_path: str, st: Settings,
-                        lang: Optional[str], ctx: str, terms: List[str], db: np.ndarray, bs: int, quiet: bool) -> int:
+                        lang: Optional[str], ctx: str, terms: List[str], db: np.ndarray, bs: int, quiet: bool,
+                        segs: Sequence[Tuple[float, float]] = ()) -> int:
         """最後まで怪しいクリップだけ別のモデルで読み直し、怪しさが減るなら差し替える。元の結果は attempts に残す"""
         p2 = find_preset(st.second_opinion)
         main = self.preset_of(st)
@@ -500,29 +501,58 @@ class Session:
             if p2.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
                 opts.update(dtype=st.dtype)
             self.h.ensure_loaded(p2.env, "asr2", p2.engine, opts, self.extra_env(), exclusive_group="asr2")
+        # このモデルのおすすめより長いクリップは、発話の切れ目で区切り直して読ませ、あとで本文をつなぐ
+        # (長いクリップで発話を読み飛ばすモデルだと、飛ばした結果のほうが「怪しくない」と判定されてしまうため)
+        lim = float(p2.max_clip) if p2.max_clip else 0.0
+        gap = float(p2.max_gap) if p2.max_gap is not None else DEFAULT_MAX_GAP
+        pieces_of: Dict[int, List[core.Clip]] = {}
+        next_id = max((r.clip.id for r in results), default=0) + 1
+        for c in [r.clip for r in bad]:
+            if lim and c.dur > lim + 0.5:
+                inner = [(max(s, c.start), min(e, c.end)) for s, e in segs if e > c.start and s < c.end] or [(c.start, c.end)]
+                cut = core.build_clips(inner, c.end, max_clip=lim, max_gap=gap, pad=min(st.vad_pad, 0.2), overlap=0.0, db=db)
+                for k, x in enumerate(cut):
+                    x.id, x.parent, x.start = next_id + k, c.id, max(x.start, c.start)
+                next_id += len(cut)
+                pieces_of[c.id] = cut or [c]
+            else:
+                pieces_of[c.id] = [c]
         for use_ctx, clips2 in groups.items():
             if not clips2:
                 continue
+            todo = [x for c in clips2 for x in pieces_of[c.id]]
             if server is not None:
-                res2 += core.run_asr(clips2, w.get, server.transcribe_fn(lang_code(lang), st.vllm_concurrency),
+                res2 += core.run_asr(todo, w.get, server.transcribe_fn(lang_code(lang), st.vllm_concurrency),
                                      context=use_ctx, policy=policy, batch_size=st.vllm_concurrency)
             else:
-                r = self.h.worker(p2.env).call("transcribe", key="asr2", wav=wav_path, clips=[c.to_dict() for c in clips2],
+                r = self.h.worker(p2.env).call("transcribe", key="asr2", wav=wav_path, clips=[c.to_dict() for c in todo],
                                                language=lang, context=use_ctx, policy=asdict(policy), batch_size=bs)
                 res2 += [core.ClipResult.from_dict(d) for d in r["results"]]
         by_id = {x.clip.id: x for x in res2}
         adopted = 0
+        inflating = {"repetition", "too_dense", "context_echo", "context_label"}  # 元の本文が水増しされている疑い
         for r in bad:
-            a = by_id.get(r.clip.id)
-            if a is None:
+            parts = [by_id.get(x.id) for x in pieces_of.get(r.clip.id, [])]
+            if not parts or any(a is None for a in parts):
                 continue
-            f2 = core.quality_flags(a.text, r.clip.dur, r.clip.speech, ctx_terms=terms, ctx_label=st.context_label,
+            if len(parts) == 1:
+                text2, words2 = parts[0].text, parts[0].words
+            else:  # 区切り直したもの: 本文をつなぐ(時刻はアライナーで付け直す)
+                text2, words2 = core.join_texts([a.text for a in parts]), None
+            f2 = core.quality_flags(text2, r.clip.dur, r.clip.speech, ctx_terms=terms, ctx_label=st.context_label,
                                     punctuates=p2.punctuates, lang=lang or "")
-            r.attempts.append({"model": p2.key, "text": a.text, "flags": f2})
-            if len(f2) < len(r.flags):
+            att: Dict[str, Any] = {"model": p2.key, "text": text2, "flags": f2}
+            if len(parts) > 1:
+                att["pieces"] = len(parts)
+            r.attempts.append(att)
+            # 元より大きく短い結果は、元が水増しを疑われているとき以外は採らない(読み飛ばしの疑い)
+            too_short = core.core_len(text2) < 0.6 * core.core_len(r.text) and not (set(r.flags) & inflating)
+            if len(f2) < len(r.flags) and not too_short:
                 r.attempts.append({"adopted": p2.key})
-                r.text, r.flags, r.words = a.text, f2, a.words
+                r.text, r.flags, r.words = text2, f2, words2
                 adopted += 1
+            elif too_short and len(f2) < len(r.flags):
+                att["rejected"] = "元より大きく短い(読み飛ばしの疑い)"
         if not quiet:
             log(f"      → {adopted} クリップを {p2.label} の結果に差し替えました(元の結果は JSON と要確認リストに残っています)")
         return adopted
@@ -638,7 +668,7 @@ class Session:
         # 4.5) セカンドオピニオン(怪しいクリップだけ別モデルで)
         if st.second_opinion and n_flag:
             t = time.time()
-            n_adopt = self._second_opinion(results, w, wav_path, st, lang, ctx, terms, db, bs, quiet)
+            n_adopt = self._second_opinion(results, w, wav_path, st, lang, ctx, terms, db, bs, quiet, segs)
             n_flag = sum(1 for r in results if r.flags)
             T["second_opinion"] = time.time() - t
             asr_info["second_opinion_adopted"] = n_adopt

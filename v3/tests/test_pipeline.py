@@ -162,6 +162,27 @@ def test_second_opinion_and_review(home, audio, tmp_path):
         sess.free()
 
 
+def test_second_opinion_resplits_long_clips(home, audio, tmp_path):
+    """セカンドオピニオンのモデルのおすすめ(max_clip)より長いクリップは、区切り直して読ませて本文をつなぐ"""
+    from asrkit import pipeline, presets
+
+    sess = _session()
+    presets.PRESETS.append(presets.Preset("dummy-short", "ダミー短", "dummy", "fake", "dummy-model-3", max_clip=8.0,
+                                          max_gap=1.0))
+    st = pipeline.Settings(output_dir=str(tmp_path), preset="dummy", vad="energy", max_clip=20, batch_size=4,
+                           formats=("json",), context_label="ECHO", context_terms=["Claude"], cache=False,
+                           retry=False, second_opinion="dummy-short")
+    try:
+        o = sess.transcribe_file(audio, st)
+        assert o["meta"]["asr"]["second_opinion_adopted"] >= 1
+        doc = json.load(open(o["paths"]["json"], encoding="utf-8"))
+        tries = [a for c in doc["clips"] for a in c.get("attempts", []) if a.get("model") == "dummy-short"]
+        assert tries and max(a.get("pieces", 1) for a in tries) >= 2
+        assert all("ECHO" not in s["text"] for s in doc["segments"])
+    finally:
+        sess.free()
+
+
 def test_minutes_prompt_only(tmp_path):
     from asrkit import pipeline
 
