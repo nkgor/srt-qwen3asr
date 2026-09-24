@@ -639,73 +639,91 @@ class VLLMServer:
 
 
 class Handles:
-    """ワーカーと vLLM サーバーをまとめて持つ。カーネルに1つだけ置いて使い回す"""
+    """ワーカーと vLLM サーバーをまとめて持つ。カーネルに1つだけ置いて使い回す。
+    区間検出のあいだに裏のスレッドで読み込みを始めるので、環境ごとに順番待ちをする
+    (同じ環境のワーカーを二つ作ったり、同じモデルを二重に読み込んだりしないように)"""
 
     def __init__(self) -> None:
         self.workers: Dict[str, Worker] = {}
         self.vllm: Optional[VLLMServer] = None
+        self._lock = threading.Lock()
+        self._env_locks: Dict[str, "threading.RLock"] = {}
+        self._vllm_lock = threading.RLock()
+
+    def _env_lock(self, env_name: str) -> "threading.RLock":
+        with self._lock:
+            lk = self._env_locks.get(env_name)
+            if lk is None:
+                lk = self._env_locks[env_name] = threading.RLock()
+            return lk
 
     def worker(self, env_name: str, extra_env: Optional[Dict[str, str]] = None) -> Worker:
-        w = self.workers.get(env_name)
-        if w is not None and w.alive():
+        with self._env_lock(env_name):
+            w = self.workers.get(env_name)
+            if w is not None and w.alive():
+                return w
+            if w is not None:
+                log(f"⚠️ ワーカー({env_name})が止まっていたので起動しなおします {w.death_hint()}。末尾ログ:\n{w.tail(15)}")
+            w = Worker(env_name, extra_env)
+            self.workers[env_name] = w
             return w
-        if w is not None:
-            log(f"⚠️ ワーカー({env_name})が止まっていたので起動しなおします {w.death_hint()}。末尾ログ:\n{w.tail(15)}")
-        w = Worker(env_name, extra_env)
-        self.workers[env_name] = w
-        return w
 
     def ensure_loaded(self, env_name: str, key: str, kind: str, options: Dict[str, Any],
                       extra_env: Optional[Dict[str, str]] = None, exclusive_group: Optional[str] = None) -> Dict[str, Any]:
         """ワーカーにエンジンを読み込ませる(同じ設定なら何もしない)。
         exclusive_group が同じエンジンは同時に1つだけ(ASR モデルの切り替えで前のを解放)"""
-        w = self.worker(env_name, extra_env)
-        cur = w.loaded.get(key)
-        if cur is not None and cur.get("options") == options and cur.get("kind") == kind:
-            return dict(cur.get("info", {}), reused=True)  # 読み込み済み(load_sec は前に読み込んだときの値)
-        if exclusive_group:
-            for k, v in list(w.loaded.items()):
-                if v.get("group") == exclusive_group and k != key:
-                    self.unload(env_name, k)
-        if cur is not None:
-            self.unload(env_name, key)
-        t0 = time.time()
-        log(f"モデル読み込み中: {options.get('model', kind)} ({env_name})")
-        r = w.call("load", key=key, kind=kind, options=options)
-        info = r.get("info", {})
-        w.loaded[key] = {"kind": kind, "options": options, "info": info, "group": exclusive_group}
-        log(f"✅ 読み込み完了 ({core.fmt_dur(time.time() - t0)}) {info.get('summary', '')}")
-        return info
+        with self._env_lock(env_name):
+            w = self.worker(env_name, extra_env)
+            cur = w.loaded.get(key)
+            if cur is not None and cur.get("options") == options and cur.get("kind") == kind:
+                return dict(cur.get("info", {}), reused=True)  # 読み込み済み(load_sec は前に読み込んだときの値)
+            if exclusive_group:
+                for k, v in list(w.loaded.items()):
+                    if v.get("group") == exclusive_group and k != key:
+                        self.unload(env_name, k)
+            if cur is not None:
+                self.unload(env_name, key)
+            t0 = time.time()
+            log(f"モデル読み込み中: {options.get('model', kind)} ({env_name})")
+            r = w.call("load", key=key, kind=kind, options=options)
+            info = r.get("info", {})
+            w.loaded[key] = {"kind": kind, "options": options, "info": info, "group": exclusive_group}
+            log(f"✅ 読み込み完了 ({core.fmt_dur(time.time() - t0)}) {info.get('summary', '')}")
+            return info
 
     def unload(self, env_name: str, key: str) -> None:
-        w = self.workers.get(env_name)
-        if w is None or not w.alive():
-            return
-        if key in w.loaded:
-            try:
-                w.call("unload", key=key)
-            except Exception:
-                pass
-            w.loaded.pop(key, None)
+        with self._env_lock(env_name):
+            w = self.workers.get(env_name)
+            if w is None or not w.alive():
+                return
+            if key in w.loaded:
+                try:
+                    w.call("unload", key=key)
+                except Exception:
+                    pass
+                w.loaded.pop(key, None)
 
     def vllm_server(self, env_name: str, model: str, **kw: Any) -> VLLMServer:
-        s = VLLMServer(env_name, model, **kw)
-        if self.vllm is not None and self.vllm.alive() and self.vllm.key == s.key:
-            return self.vllm
-        if self.vllm is not None:
-            self.vllm.stop()
-        s.start()
-        self.vllm = s
-        return s
+        with self._vllm_lock:
+            s = VLLMServer(env_name, model, **kw)
+            if self.vllm is not None and self.vllm.alive() and self.vllm.key == s.key:
+                return self.vllm
+            if self.vllm is not None:
+                self.vllm.stop()
+            s.start()
+            self.vllm = s
+            return s
 
     def stop_vllm(self) -> None:
-        if self.vllm is not None:
-            self.vllm.stop()
-            self.vllm = None
+        with self._vllm_lock:
+            if self.vllm is not None:
+                self.vllm.stop()
+                self.vllm = None
 
     def close_worker(self, env_name: str) -> None:
         """ワーカーをプロセスごと止める(モデルを外すだけより確実に CPU のメモリが戻る)"""
-        w = self.workers.pop(env_name, None)
+        with self._env_lock(env_name):
+            w = self.workers.pop(env_name, None)
         if w is not None:
             w.close()
 

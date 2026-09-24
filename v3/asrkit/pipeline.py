@@ -16,7 +16,7 @@ import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -120,6 +120,28 @@ def clip_settings(st: "Settings", p: Preset) -> "Settings":
     mc = st.max_clip if st.max_clip else (p.max_clip or DEFAULT_MAX_CLIP)
     mg = st.max_gap if st.max_gap is not None else (p.max_gap if p.max_gap is not None else DEFAULT_MAX_GAP)
     return st.replace(max_clip=float(mc), max_gap=float(mg))
+
+
+def _load_sec(asr_info: Dict[str, Any]) -> float:
+    """文字起こしの段階で、モデルの読み込み(vLLM はサーバーの起動)を待った秒数。使い回したときは 0。
+    区間検出と並べて裏で読み込んだぶんは合計に効かないので、待った時間(load_wait)があればそちらを使う"""
+    if asr_info.get("reused") or asr_info.get("cached"):
+        return 0.0
+    if asr_info.get("load_wait") is not None:
+        return float(asr_info["load_wait"])
+    return float(asr_info.get("load_sec") or 0.0)
+
+
+def timing_breakdown(T: Dict[str, float], asr_info: Dict[str, Any]) -> str:
+    """合計時間の内訳(合計と足し算が合うように)。「推論だけ」の速さと全体の速さの差がどこから来るかを見せる"""
+    load = min(_load_sec(asr_info), float(T.get("asr") or 0.0))
+    parts = [("音声の変換", T.get("audio")), ("区間検出", T.get("vad")), ("モデルの読み込み待ち", load),
+             ("文字起こし", max(0.0, float(T.get("asr") or 0.0) - load)), ("セカンドオピニオン", T.get("second_opinion")),
+             ("タイムスタンプ", T.get("align")), ("話者分離の待ち", T.get("diar_wait"))]
+    known = sum(float(v or 0.0) for _, v in parts)
+    if T.get("total"):
+        parts.append(("書き出しなど", max(0.0, float(T["total"]) - known)))
+    return "・".join(f"{k} {core.fmt_dur(float(v))}" for k, v in parts if v is not None and float(v) >= 0.05)
 
 
 def _sha(obj: Any, n: int = 16) -> str:
@@ -335,7 +357,7 @@ class Session:
     # ---------------------------------------------------------- 各ステージ
     def _asr(self, p: Preset, w: core.Wav16, wav_path: str, clips: List[core.Clip], st: Settings,
              lang: Optional[str], ctx: str, terms: List[str], db: np.ndarray, cache_path: Optional[str],
-             bs: int, quiet: bool = False) -> Tuple[List[core.ClipResult], Dict[str, Any]]:
+             bs: int, quiet: bool = False, preload: Optional[Future] = None) -> Tuple[List[core.ClipResult], Dict[str, Any]]:
         from tqdm.auto import tqdm
 
         policy = core.RetryPolicy(enabled=st.retry, punctuates=p.punctuates, lang=lang or "")
@@ -376,27 +398,18 @@ class Session:
         info: Dict[str, Any] = {}
         t0 = time.time()
         try:
+            # モデルの読み込み(区間検出のあいだに裏で始めていれば、その残りを待つだけ)
+            info = self._wait_or_load(preload, p, st, bs)
+            info["load_wait"] = round(time.time() - t0, 2)
+            t0 = time.time()  # 速度比較は読み込み(vLLM はサーバーの起動)を除いて測る
             if p.engine == "vllm":
-                g = self.gpu
-                mem = st.vllm_gpu_mem or (min(0.6, max(0.3, (g.mem_gb - 14) / max(g.mem_gb, 1))) if g.ok else 0.5)
-                t_load = time.time()
-                server = self.h.vllm_server("vllm", p.model, gpu_mem=mem, extra_args=p.vllm_args, extra_env=self.extra_env())
-                waited = time.time() - t_load
-                info["load_sec"] = server.start_sec if server.start_sec is not None else round(waited, 1)
-                info["reused"] = waited < 1.0  # 起動済みのサーバーを使い回した
-                t0 = time.time()  # 速度比較はサーバー起動時間を除いて測る
+                server = self.h.vllm
+                if server is None or not server.alive():
+                    raise runtime.WorkerError("vLLM サーバーが動いていません")
                 fn = server.transcribe_fn(lang_code(lang), concurrency=st.vllm_concurrency)
                 res = core.run_asr(clips, w.get, fn, context=ctx, ctx_terms=terms, ctx_label=st.context_label,
                                    policy=policy, batch_size=st.vllm_concurrency, db=db, on_progress=on_progress, done=done)
             else:
-                opts: Dict[str, Any] = dict(p.options)
-                opts.update(model=p.model, batch_size=bs)
-                if p.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
-                    opts.update(dtype=st.dtype)
-                if p.engine == "qwen":
-                    opts.update(attn=st.attn, max_new_tokens=st.max_new_tokens)
-                info = dict(self.h.ensure_loaded(p.env, "asr", p.engine, opts, self.extra_env(), exclusive_group="asr"))
-                t0 = time.time()  # 速度比較はモデルの読み込み時間を除いて測る
                 wk = self.h.worker(p.env)
                 r = wk.call(
                     "transcribe", key="asr", wav=wav_path, clips=[c.to_dict() for c in clips],
@@ -416,6 +429,42 @@ class Session:
             with open(cache_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"final": True, "results": [r.to_dict() for r in res]}, ensure_ascii=False) + "\n")
         return res, info
+
+    def _load_asr(self, p: Preset, st: Settings, bs: int) -> Dict[str, Any]:
+        """ASR のモデルを読み込む(vLLM はサーバーを起動)。load_sec = 読み込みの秒数、reused = 読み込み済みを使い回した"""
+        if p.engine == "vllm":
+            g = self.gpu
+            mem = st.vllm_gpu_mem or (min(0.6, max(0.3, (g.mem_gb - 14) / max(g.mem_gb, 1))) if g.ok else 0.5)
+            t = time.time()
+            server = self.h.vllm_server("vllm", p.model, gpu_mem=mem, extra_args=p.vllm_args, extra_env=self.extra_env())
+            waited = time.time() - t
+            return {"load_sec": server.start_sec if server.start_sec is not None else round(waited, 1),
+                    "reused": waited < 1.0}
+        opts: Dict[str, Any] = dict(p.options)
+        opts.update(model=p.model, batch_size=bs)
+        if p.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
+            opts.update(dtype=st.dtype)
+        if p.engine == "qwen":
+            opts.update(attn=st.attn, max_new_tokens=st.max_new_tokens)
+        return dict(self.h.ensure_loaded(p.env, "asr", p.engine, opts, self.extra_env(), exclusive_group="asr"))
+
+    def _wait_or_load(self, preload: Optional[Future], p: Preset, st: Settings, bs: int) -> Dict[str, Any]:
+        if preload is not None:
+            try:
+                return dict(preload.result())  # 裏で読み込み中なら、ここで終わるのを待つ
+            except Exception as e:  # もう一度ふつうに読み込む(だめならそこでエラーを出す)
+                log(f"(裏での読み込みに失敗したので、もう一度読み込みます: {type(e).__name__}: {str(e)[:200]})")
+        return self._load_asr(p, st, bs)
+
+    def _aligner_opts(self, st: Settings, bs: int) -> Dict[str, Any]:
+        return {"model": st.aligner_model, "dtype": st.dtype, "attn": st.attn, "batch_size": min(bs, 16)}
+
+    @staticmethod
+    def _background(fn: Callable[..., Any], *args: Any) -> Future:
+        ex = ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(fn, *args)
+        ex.shutdown(wait=False)
+        return fut
 
     def _align(self, p: Preset, results: List[core.ClipResult], wav_path: str, st: Settings, lang: Optional[str],
                cache_path: Optional[str], bs: int, quiet: bool = False) -> Dict[int, List[List[Any]]]:
@@ -446,9 +495,7 @@ class Session:
         if not os.path.exists(runtime.env_python(self.aligner_env)):
             log(f"⚠️ アライナー用の環境({self.aligner_env})がないので、タイムスタンプはモデル固有/概算になります")
             return {}
-        self.h.ensure_loaded(self.aligner_env, "aligner", self.aligner_kind,
-                             {"model": st.aligner_model, "dtype": st.dtype, "attn": st.attn, "batch_size": min(bs, 16)},
-                             self.extra_env())
+        self.h.ensure_loaded(self.aligner_env, "aligner", self.aligner_kind, self._aligner_opts(st, bs), self.extra_env())
         bar = tqdm(total=len(items), desc="タイムスタンプ", unit="clip", disable=quiet, dynamic_ncols=True)
         try:
             r = self.h.worker(self.aligner_env).call(
@@ -576,13 +623,14 @@ class Session:
         if not os.path.exists(runtime.env_python(self.diar_env)):
             log(f"⚠️ 話者分離の環境({self.diar_env})がありません。セットアップのセルで入れてください")
             return None
-        # ワーカーの起動とモデル読み込みはここで(裏のスレッドでは文字起こしと並べて話者分離だけする)
-        self.h.ensure_loaded(self.diar_env, "diar", self.diar_kind, {"model": st.diar_model}, self.extra_env())
-        wk = self.h.worker(self.diar_env)
+        env = self.extra_env()
 
         def job() -> Dict[str, Any]:
-            r = wk.call("diarize", key="diar", wav=wav_path, num_speakers=st.num_speakers,
-                        min_speakers=st.min_speakers, max_speakers=st.max_speakers)
+            # 読み込みから裏で(区間検出・文字起こしと並べて走る。失敗しても文字起こしは続ける)
+            self.h.ensure_loaded(self.diar_env, "diar", self.diar_kind, {"model": st.diar_model}, env)
+            r = self.h.worker(self.diar_env).call(
+                "diarize", key="diar", wav=wav_path, num_speakers=st.num_speakers,
+                min_speakers=st.min_speakers, max_speakers=st.max_speakers)
             d = {"turns": r["turns"], "exclusive": r.get("exclusive"), "seconds": r.get("seconds")}
             if cache_path:
                 with open(cache_path, "w", encoding="utf-8") as f:
@@ -621,7 +669,19 @@ class Session:
         if not quiet:
             log(f"[1/6] 音声 {core.fmt_dur(w.duration)} を読み込み ({core.fmt_dur(T['audio'])})")
 
-        # 2) 区間検出 → クリップ
+        # 2) 話者分離(裏で並行して走らせる。音声さえあれば始められるので、区間検出より前に)
+        diar_key = _sha([wav_key])
+        diar_cache = os.path.join(cache_dir, f"{stem}.{diar_key}") if cache_dir else None
+        diar_fut = self._diar_start(wav_path, st, diar_cache)
+
+        # 区間検出のあいだに、裏で ASR のモデル(とアライナー)を読み込んでおく(最初の 1 件が速くなる)
+        bs = self.batch_size(st, p)
+        asr_pre = self._background(self._load_asr, p, st, bs)
+        if st.aligner and self.aligner_env != p.env and os.path.exists(runtime.env_python(self.aligner_env)):
+            self._background(self.h.ensure_loaded, self.aligner_env, "aligner", self.aligner_kind,
+                             self._aligner_opts(st, bs), self.extra_env())
+
+        # 3) 区間検出 → クリップ
         t = time.time()
         segs = self.vad(w, wav_key, st, db)
         max_clip = min(float(st.max_clip), 170.0) if st.aligner else float(st.max_clip)
@@ -635,15 +695,9 @@ class Session:
                 f"(上限 {max_clip:g}秒・無音 {st.max_gap:g}秒でつなぐ / 最長 {max((c.dur for c in clips), default=0):.1f}秒,"
                 f" ハード切り {n_hard} か所)")
 
-        # 3) 話者分離(裏で並行して走らせる)
-        diar_key = _sha([wav_key])
-        diar_cache = os.path.join(cache_dir, f"{stem}.{diar_key}") if cache_dir else None
-        diar_fut = self._diar_start(wav_path, st, diar_cache)
-
         # 4) 文字起こし
         terms = list(st.context_terms)
         ctx = core.build_context(st.context_label, terms, st.context_extra)
-        bs = self.batch_size(st, p)
         asr_key = _sha([VERSION, wav_key, [c.to_dict() for c in clips], p.engine, p.model, p.options, lang, ctx,
                         st.retry, st.max_new_tokens])
         asr_cache = os.path.join(cache_dir, f"{stem}.{asr_key}.asr.jsonl") if cache_dir else None
@@ -651,7 +705,8 @@ class Session:
             log(f"[3/6] 文字起こし: {p.label} / 言語={lang or '自動'} / バッチ={st.vllm_concurrency if p.engine == 'vllm' else bs}"
                 + (f" / context={ctx[:60]}{'…' if len(ctx) > 60 else ''}" if ctx and p.context else ""))
         t = time.time()
-        results, asr_info = self._asr(p, w, wav_path, clips, st, lang, ctx, terms, db, asr_cache, bs, quiet)
+        results, asr_info = self._asr(p, w, wav_path, clips, st, lang, ctx, terms, db, asr_cache, bs, quiet,
+                                      preload=asr_pre)
         T["asr"] = time.time() - t
         n_retry = sum(1 for r in results if len(r.attempts) > 1)
         n_flag = sum(1 for r in results if r.flags)
@@ -661,8 +716,8 @@ class Session:
             else:  # 倍速はモデルの読み込み・vLLM の起動を除いた推論だけの時間で(⑥の表と同じ)
                 infer = float(asr_info.get("asr_sec") or T["asr"])
                 load = 0.0 if asr_info.get("reused") else float(asr_info.get("load_sec") or 0.0)
-                speed = (f"推論 {core.fmt_dur(infer)}, x{w.duration / max(infer, 1e-6):.0f} 倍速"
-                         + (f" / 読み込み {core.fmt_dur(load)}" if load >= 0.5 else ""))
+                speed = (f"推論だけで {core.fmt_dur(infer)} = x{w.duration / max(infer, 1e-6):.0f} 倍速"
+                         + (f" / モデルの読み込み {core.fmt_dur(load)}" if load >= 0.5 else ""))
             log(f"      → {len(results)} クリップ / 再推論 {n_retry} / 要確認 {n_flag} ({speed})")
 
         # 4.5) セカンドオピニオン(怪しいクリップだけ別モデルで)
@@ -738,8 +793,10 @@ class Session:
         paths, texts = write_outputs(base, words, results, turns, names, st, meta)
         T["total"] = time.time() - t_all
         meta["timing_sec"]["total"] = round(T["total"], 2)
+        meta["timing_sec"]["load"] = round(_load_sec(asr_info), 2)
         if not quiet:
-            log(f"[6/6] 書き出し完了 (合計 {core.fmt_dur(T['total'])}, x{w.duration / max(T['total'], 1e-6):.0f} 倍速)")
+            log(f"[6/6] 書き出し完了 (合計 {core.fmt_dur(T['total'])} = 音声の x{w.duration / max(T['total'], 1e-6):.0f} 倍速)")
+            log(f"      内訳: {timing_breakdown(T, asr_info)}")
             for k, v in paths.items():
                 print(f"   📄 {v}")
         out = {"base": base, "paths": paths, "text": texts.get("plain", ""), "meta": meta, "words": len(words),

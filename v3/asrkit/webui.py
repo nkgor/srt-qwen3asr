@@ -18,7 +18,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from . import core, runtime
-from .pipeline import Session, Settings, log
+from .pipeline import Session, Settings, log, timing_breakdown
 from .presets import PRESETS, Preset, find_preset
 
 OUT_ROOT = os.path.join(runtime.BASE_DIR, "webui")
@@ -122,8 +122,8 @@ def transcribe(sess: Session, base: Settings, src: str, *, model: str, language:
     total = float(T.get("total") or 0)
     summary = [
         f"**{os.path.basename(src)}** — {core.fmt_dur(dur)} / {p.label}",
-        f"合計 {core.fmt_dur(total)}（x{dur / max(total, 1e-6):.0f} 倍速）"
-        + (f"・推論 {core.fmt_dur(asr['asr_sec'])}" if asr.get("asr_sec") else ""),
+        f"合計 {core.fmt_dur(total)}（音声の x{dur / max(total, 1e-6):.0f} 倍速）",
+        f"内訳: {timing_breakdown(T, asr)}",
         f"再推論 {o.get('retries', 0)} / 要確認 {o.get('flags', 0)}"
         + (f"・話者 {diar.get('speakers')} 人" if diar.get("speakers") else ""),
     ]

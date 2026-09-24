@@ -78,3 +78,18 @@ def test_granite_batches_by_prompt_and_keeps_order():
     # 1 回の呼び出しの中はプロンプト(キーワードあり/なし)がそろっていて、バッチは 2 件まで
     assert all(len({bool(c) for c in call}) == 1 and len(call) <= 2 for call in calls)
     assert sum(len(c) for c in calls) == 5
+
+
+def test_timing_breakdown_adds_up():
+    """合計の内訳: 読み込みは文字起こしから分けて出し、足すと合計になる(使い回したときは読み込み 0)"""
+    import re
+
+    T = {"audio": 2.8, "vad": 14.2, "asr": 37.1, "align": 10.1, "diar_wait": 0.0, "total": 69.0}
+    s = pipeline.timing_breakdown(T, {"load_sec": 34.0, "asr_sec": 2.7})
+    assert "モデルの読み込み待ち 34.0秒" in s and "文字起こし 3.1秒" in s and "話者分離の待ち" not in s
+    assert abs(sum(float(x) for x in re.findall(r"([0-9.]+)秒", s)) - 69.0) < 0.1
+    s2 = pipeline.timing_breakdown(dict(T, asr=3.0, total=34.9), {"load_sec": 34.0, "reused": True})
+    assert "モデルの読み込み" not in s2 and "文字起こし 3.0秒" in s2
+    # 区間検出のあいだに裏で読み込んだときは、待った時間(load_wait)だけが合計に効く
+    s3 = pipeline.timing_breakdown(dict(T, asr=23.0, total=54.9), {"load_sec": 34.0, "load_wait": 20.0})
+    assert "モデルの読み込み待ち 20.0秒" in s3 and "文字起こし 3.0秒" in s3

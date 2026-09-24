@@ -169,6 +169,27 @@ def test_worker_survives_short_lived_thread(home):
         h.close_all()
 
 
+def test_handles_are_thread_safe(home):
+    """区間検出のあいだに裏で読み込むので、同時に同じ環境を使っても、ワーカーは 1 つだけで読み込みも全部残ること"""
+    import threading
+
+    from asrkit import runtime
+
+    h = runtime.Handles()
+    try:
+        ts = [threading.Thread(target=h.ensure_loaded, args=("fake", k, "dummy", {"model": k})) for k in "abcd"]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert list(h.workers) == ["fake"]
+        w = h.workers["fake"]
+        assert set(w.loaded) == set("abcd")
+        assert set(w.call("ping")["info"]["loaded"]) == set("abcd")  # ワーカーの中にも 4 つとも入っている
+    finally:
+        h.close_all()
+
+
 def test_vllm_server_survives_short_lived_thread(home):
     """vLLM サーバーも同じ: ⑨ の 1 件ぶんのスレッドが終わっても止まらず、次の 1 件で使い回せること
     (本物の vLLM の代わりに /health に答えるだけの小さなサーバーを使う)"""
