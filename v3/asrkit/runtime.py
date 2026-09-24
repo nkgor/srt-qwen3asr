@@ -661,6 +661,12 @@ class Handles:
             self.vllm.stop()
             self.vllm = None
 
+    def close_worker(self, env_name: str) -> None:
+        """ワーカーをプロセスごと止める(モデルを外すだけより確実に CPU のメモリが戻る)"""
+        w = self.workers.pop(env_name, None)
+        if w is not None:
+            w.close()
+
     def close_all(self) -> None:
         self.stop_vllm()
         for w in list(self.workers.values()):

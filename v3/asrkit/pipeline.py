@@ -108,11 +108,11 @@ DEFAULT_MAX_GAP = 6.0
 
 
 def auto_num(v: Any) -> Optional[float]:
-    """フォームの「自動」/空欄 → None、それ以外は数値"""
+    """フォームの「自動」/空欄 → None、それ以外は数値(「15秒」のような単位つきも可。0 は 0 のまま)"""
     s = str(v if v is not None else "").strip()
-    if s in ("", "自動", "auto", "Auto", "AUTO", "None"):
+    if s.lower() in ("", "自動", "auto", "none"):
         return None
-    return float(s)
+    return float(s.rstrip("秒sS").strip())
 
 
 def clip_settings(st: "Settings", p: Preset) -> "Settings":
@@ -833,12 +833,17 @@ class Session:
             elif st.context_terms:
                 row["terms_found"] = sum(text.count(t) for t in st.context_terms)
             rows.append(row)
-            main_key = self.preset_of(st).key if st.preset else ""
-            if not keep_loaded and p.key != main_key:  # 本番で使うモデルは残しておく
+            main = self.preset_of(st) if st.preset else None
+            if not keep_loaded and (main is None or p.key != main.key):  # 本番で使うモデルは残しておく
                 if p.engine == "vllm":
                     self.h.stop_vllm()
                 else:
                     self.h.unload(p.env, "asr")
+                    # ほかに使わないワーカーはプロセスごと止めて CPU のメモリを返す(標準の Colab は RAM 12GB ほど)
+                    w = self.h.workers.get(p.env)
+                    if (w is not None and not w.loaded and p.env not in (self.aligner_env, self.diar_env)
+                            and (main is None or p.env != main.env)):
+                        self.h.close_worker(p.env)
         # 表
         ok = [r for r in rows if "error" not in r]
         if ok and not ref and len(ok) >= 2:

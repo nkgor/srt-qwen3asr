@@ -183,6 +183,26 @@ def test_second_opinion_resplits_long_clips(home, audio, tmp_path):
         sess.free()
 
 
+def test_compare_closes_idle_workers(home, audio, tmp_path):
+    """⑥: 比べ終わった別環境のワーカーはプロセスごと止め、本命の環境は残す。表の材料(区切り方・抜け)もそろう"""
+    from asrkit import pipeline, presets, runtime
+
+    env2 = runtime.ensure_env(runtime.EnvSpec(name="fake2", packages=["numpy"],
+                                              check="import numpy; print('numpy', numpy.__version__)"))
+    assert env2.ok, env2.info
+    sess = _session()
+    presets.PRESETS.append(presets.Preset("dummy-other", "ダミー別環境", "dummy", "fake2", "dummy-model-4"))
+    st = pipeline.Settings(output_dir=str(tmp_path), preset="dummy", vad="energy", batch_size=2, cache=False)
+    try:
+        rows = sess.compare(audio, ["dummy", "dummy-other"], st, start=0, duration=30, reference="これは1番目の文です。")
+        assert [r["preset"] for r in rows] == ["dummy", "dummy-other"] and all("error" not in r for r in rows)
+        assert "fake2" not in sess.h.workers  # 使い終わった別環境のワーカーは止めた
+        assert "fake" in sess.h.workers and sess.h.workers["fake"].alive()  # 本命(とアライナー)の環境は残す
+        assert rows[0]["clips"]["max_clip"] == pipeline.DEFAULT_MAX_CLIP and rows[0]["drops"] is not None
+    finally:
+        sess.free()
+
+
 def test_minutes_prompt_only(tmp_path):
     from asrkit import pipeline
 

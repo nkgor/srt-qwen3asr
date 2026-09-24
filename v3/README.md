@@ -47,7 +47,7 @@
 ### Colab 実機で確かめたこと（A100・2026年9月。くわしくは [test_reports/colab_e2e.md](test_reports/colab_e2e.md)）
 
 - 全モデルが動きました。Common Voice 8 をつないだテスト音声では Qwen3-ASR 1.7B（CER 8.8%）と Whisper large-v3-turbo（8.0%）がいちばんよく、vLLM 版は同じ精度で推論が 5〜6 倍速いです（サーバー起動に 1〜2 分）
-- Colab のカーネルが Python 3.13 になっているので、いまは flash-attn の whl が合わず sdpa で動きます
+- Colab のカーネルが Python 3.13 になっていて flash-attn の whl が合わず sdpa で動きました（そのあと 3.13 用の whl を足したので、次からは入るはずです。未確認）
 - Cohere Transcribe は HF で規約に同意するまで 403 になります
 - kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます。長いクリップだと発話を飛ばしやすいです（Cohere も少し）
 

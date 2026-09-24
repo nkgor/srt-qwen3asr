@@ -19,6 +19,8 @@ def test_auto_num():
     assert pipeline.auto_num("15") == 15.0
     assert pipeline.auto_num(" 1.5 ") == 1.5
     assert pipeline.auto_num(20) == 20.0
+    assert pipeline.auto_num("15秒") == 15.0 and pipeline.auto_num("2s") == 2.0
+    assert pipeline.auto_num("0") == 0.0  # 無音 0 秒(どんな短い無音でも区切る)は「自動」ではない
 
 
 def test_clip_settings_uses_preset_recommendation():
