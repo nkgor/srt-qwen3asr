@@ -125,9 +125,9 @@ def main() -> int:
                     o[k] = v
             p = dataclasses.replace(base, key=f"{base.key}@{tag}", label=f"{base.label} [{tag}]", options=o)
             presets.PRESETS.append(p)
-        if cur_env and cur_env != (base.env, base.key):  # 前のモデルを外す(別の環境ならプロセスごと止めてメモリを返す)
+        if cur_env and cur_env != (base.env, base.key):  # 前のモデルを外す(プロセスごと止めて CPU のメモリも返す)
             sess.h.unload(cur_env[0], "asr")
-            if cur_env[0] not in (base.env, sess.aligner_env):
+            if cur_env[0] != sess.aligner_env:  # アライナーの入ったワーカーだけは残す
                 sess.h.close_worker(cur_env[0])
         cur_env = (base.env, base.key)
         st = pipeline.Settings(preset=p.key, language="Japanese", output_dir=OUT, formats=("txt", "json"),
