@@ -337,3 +337,10 @@ def test_review_items_and_markdown():
     assert [r.clip.id for r in items] == [1, 2]
     md = core.to_review_md([ok, fixed, bad], "会議")
     assert "自動で差し替え済み" in md and "同じ言葉のループ" in md and "context なし" in md
+
+
+def test_term_and_number_recall():
+    ref = "山田さんは3月5日に1,200円払いました。田中さんは三回来ました。"
+    hyp = "山田さんは3月6日に1,200円払いました。中田さんは三回来ました。"
+    assert core.term_recall(ref, hyp, ["山田", "田中"]) == (1, 2)
+    assert core.number_recall(ref, hyp) == (3, 4)  # 3, 1,200, 三 は合う / 5 が 6 に

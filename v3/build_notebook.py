@@ -140,7 +140,7 @@ vllm = False  #@param {type:"boolean"}
 faster_whisper = False  #@param {type:"boolean"}
 #@markdown **NeMo**: NVIDIA Parakeet 日本語モデルを試す（インストール数分）
 nemo = False  #@param {type:"boolean"}
-#@markdown **最新 transformers**: Cohere Transcribe や「カスタム」で新しい音声モデルを試す用
+#@markdown **最新 transformers**: Cohere Transcribe / Granite Speech / VibeVoice-ASR や「カスタム」を試す用
 hf = False  #@param {type:"boolean"}
 #@markdown ---
 #@markdown **flash-attn**: A100/H100/L4 で Qwen を少し速く・省メモリに（配布済み whl があるときだけ。なければ sdpa で動きます）
@@ -300,7 +300,7 @@ second_opinion = "なし"  #@param [SECOND_OPINION_OPTIONS]
 #@markdown **要確認リスト**: 怪しい区間・自動で直した区間を `_review.md` に書き出し、実行後に音声つきで表示
 review = True  #@param {type:"boolean"}
 #@markdown **カスタム**（② で「カスタム」を選んだとき）: エンジンと Hugging Face のモデル ID
-custom_engine = "hf-pipeline"  #@param ["hf-pipeline", "hf-speechlm", "cohere", "faster-whisper", "nemo", "qwen", "vllm"]
+custom_engine = "hf-pipeline"  #@param ["hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice", "faster-whisper", "nemo", "qwen", "vllm"]
 custom_model = ""  #@param {type:"string"}
 #@markdown ### テキスト整形
 #@markdown **fillers**: 「えー」「あのー」などを消す（safe = 伸ばし音のフィラーだけ / more = 「あの」「まあ」なども）
@@ -454,12 +454,12 @@ def build() -> dict:
         "cells": cells,
         "metadata": {
             "accelerator": "GPU",
-            "colab": {"gpuType": "L4", "provenance": [], "toc_visible": True},
+            "colab": {"gpuType": "H100", "provenance": [], "toc_visible": True},
             "kernelspec": {"display_name": "Python 3", "name": "python3"},
             "language_info": {"name": "python"},
         },
         "nbformat": 4,
-        "nbformat_minor": 0,
+        "nbformat_minor": 5,
     }
     return nb
 
@@ -471,12 +471,17 @@ def minutes_cell() -> str:
 MINUTES = """
 #@title ⑦ 議事録づくり（おまけ）
 #@markdown ⑤ の結果（`.md` か `.txt`）から議事録を作ります
-#@markdown - **プロンプトだけ作る**: `_議事録プロンプト.md` を書き出すので、Claude や ChatGPT に貼るだけ
+#@markdown - **プロンプトだけ作る**: `_minutes_prompt.md` を書き出すので、Claude や ChatGPT に貼るだけ（外には何も送りません）
+#@markdown - **Gemini（Colab AI・無料）**: Colab に組み込みの Gemini で、API キーなしでここで議事録まで作ります
 #@markdown - **Claude API**: Colab のシークレットに `ANTHROPIC_API_KEY` を登録しておくと、ここで議事録まで作ります
-mode = "プロンプトだけ作る"  #@param ["プロンプトだけ作る", "Claude API"]
+#@markdown
+#@markdown ※ Gemini / Claude を選ぶと、文字起こしの中身がそのサービスに送られます
+mode = "プロンプトだけ作る"  #@param ["プロンプトだけ作る", "Gemini（Colab AI・無料）", "Claude API"]
 style = "議事録（決定事項・TODO つき）"  #@param ["議事録（決定事項・TODO つき）", "要約（3行＋詳細）", "発言者ごとの要点"] {allow-input: true}
 #@markdown 対象（空欄なら ⑤ の最後のファイル）
 transcript = ""  #@param {type:"string"}
+#@markdown Gemini のモデル（`from google.colab import ai; ai.list_models()` で一覧）
+gemini_model = "google/gemini-3.5-flash"  #@param ["google/gemini-3.5-flash", "google/gemini-3.1-pro-preview"] {allow-input: true}
 #@markdown Claude のモデル（既定は Claude Opus 5。安全フィルタで断られたときは自動で別モデルに引き継ぐ設定にしてあります）
 claude_model = "claude-opus-5"  #@param ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] {allow-input: true}
 import os
@@ -486,7 +491,7 @@ if not _t and "OUTS" in globals() and OUTS:
     _t = _paths.get("md") or _paths.get("txt") or ""
 if not _t:
     raise ValueError("対象のテキストがありません(⑤ を実行するか transcript にパスを入れてください)")
-MINUTES_OUT = pipeline.make_minutes(_t, style=style, mode=mode, model=claude_model,
+MINUTES_OUT = pipeline.make_minutes(_t, style=style, mode=mode, model=claude_model, gemini_model=gemini_model,
                                     glossary=_terms if "_terms" in globals() else ())
 """
 

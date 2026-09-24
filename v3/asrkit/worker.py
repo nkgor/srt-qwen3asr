@@ -114,6 +114,8 @@ def main() -> None:
                 pol = core.RetryPolicy(**(msg.get("policy") or {}))
                 pol.punctuates = bool(getattr(eng, "punctuates", True)) and pol.punctuates
                 db = core.frame_db(w) if pol.enabled and pol.split else None
+                if hasattr(eng, "ctx_terms"):  # キーワードを別に受け取るモデル(Granite など)
+                    eng.ctx_terms = list(msg.get("ctx_terms") or [])
 
                 def on_progress(stage, n, total, part):
                     send({"id": rid, "event": "progress", "stage": stage, "done": n, "total": total,

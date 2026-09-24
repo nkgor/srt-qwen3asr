@@ -770,6 +770,31 @@ def edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
+_NUM = re.compile(r"[0-9０-９]+(?:[.,．，][0-9０-９]+)?|[〇一二三四五六七八九十百千万億兆]+")
+
+
+def term_recall(ref: str, hyp: str, terms: Sequence[str]) -> Tuple[int, int]:
+    """正解文に出てくる用語のうち、認識結果にも出てきた数 (hit, total)"""
+    r, h = unicodedata.normalize("NFKC", ref or ""), unicodedata.normalize("NFKC", hyp or "")
+    tot = hit = 0
+    for t in terms:
+        t = unicodedata.normalize("NFKC", t)
+        n = r.count(t)
+        if n:
+            tot += n
+            hit += min(n, h.count(t))
+    return hit, tot
+
+
+def number_recall(ref: str, hyp: str) -> Tuple[int, int]:
+    """正解文の数字(算用数字・漢数字)が認識結果にも同じ形で出てきた数 (hit, total)。金額や日付の取り違えの目安"""
+    rn = Counter(_NUM.findall(unicodedata.normalize("NFKC", ref or "")))
+    hn = Counter(_NUM.findall(unicodedata.normalize("NFKC", hyp or "")))
+    tot = sum(rn.values())
+    hit = sum(min(c, hn.get(k, 0)) for k, c in rn.items())
+    return hit, tot
+
+
 def cer(ref: str, hyp: str) -> float:
     r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
     if not r:

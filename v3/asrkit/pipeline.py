@@ -251,7 +251,8 @@ class Session:
     def batch_size(self, st: Settings, p: Preset) -> int:
         if st.batch_size and st.batch_size > 0:
             return int(st.batch_size)
-        model_gb = {"qwen": 5.0, "faster-whisper": 4.0, "nemo": 3.0, "hf-pipeline": 4.0, "hf-speechlm": 10.0}.get(p.engine, 5.0)
+        model_gb = {"qwen": 5.0, "faster-whisper": 4.0, "nemo": 3.0, "hf-pipeline": 4.0, "hf-speechlm": 10.0,
+                    "cohere": 5.0, "granite": 5.0, "vibevoice": 18.0}.get(p.engine, 5.0)
         per = 0.45 * max(1.0, st.max_clip / 30.0)
         bs = runtime.auto_batch_size(self.gpu, model_gb, per, cap=64 if p.engine == "qwen" else 32)
         if p.engine == "faster-whisper":
@@ -361,18 +362,22 @@ class Session:
             if p.engine == "vllm":
                 g = self.gpu
                 mem = st.vllm_gpu_mem or (min(0.6, max(0.3, (g.mem_gb - 14) / max(g.mem_gb, 1))) if g.ok else 0.5)
+                t_load = time.time()
                 server = self.h.vllm_server("vllm", p.model, gpu_mem=mem, extra_args=p.vllm_args, extra_env=self.extra_env())
+                info["load_sec"] = round(time.time() - t_load, 1)
+                t0 = time.time()  # 速度比較はサーバー起動時間を除いて測る
                 fn = server.transcribe_fn(lang_code(lang), concurrency=st.vllm_concurrency)
                 res = core.run_asr(clips, w.get, fn, context=ctx, ctx_terms=terms, ctx_label=st.context_label,
                                    policy=policy, batch_size=st.vllm_concurrency, db=db, on_progress=on_progress, done=done)
             else:
                 opts: Dict[str, Any] = dict(p.options)
                 opts.update(model=p.model, batch_size=bs)
-                if p.engine in ("qwen", "hf-pipeline", "hf-speechlm"):
+                if p.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
                     opts.update(dtype=st.dtype)
                 if p.engine == "qwen":
                     opts.update(attn=st.attn, max_new_tokens=st.max_new_tokens)
-                info = self.h.ensure_loaded(p.env, "asr", p.engine, opts, self.extra_env(), exclusive_group="asr")
+                info = dict(self.h.ensure_loaded(p.env, "asr", p.engine, opts, self.extra_env(), exclusive_group="asr"))
+                t0 = time.time()  # 速度比較はモデルの読み込み時間を除いて測る
                 wk = self.h.worker(p.env)
                 r = wk.call(
                     "transcribe", key="asr", wav=wav_path, clips=[c.to_dict() for c in clips],
@@ -473,7 +478,7 @@ class Session:
         else:
             opts: Dict[str, Any] = dict(p2.options)
             opts.update(model=p2.model, batch_size=bs)
-            if p2.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere"):
+            if p2.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
                 opts.update(dtype=st.dtype)
             self.h.ensure_loaded(p2.env, "asr2", p2.engine, opts, self.extra_env(), exclusive_group="asr2")
         for use_ctx, clips2 in groups.items():
@@ -616,9 +621,18 @@ class Session:
         aligned = self._align(p, results, wav_path, st, lang, os.path.join(cache_dir, f"{stem}.{asr_key}") if cache_dir else None, bs, quiet)
         words, ts_stats = core.compose_words(results, aligned, segs)
         T["align"] = time.time() - t
+        # 本文と字幕の文字数の照合(重なり部分の除去で少し減るのは正常。大きく減ったら警告)
+        n_text = sum(core.core_len(r.text) for r in results)
+        n_words = sum(core.core_len(w_.word) for w_ in words)
+        coverage = n_words / n_text if n_text else 1.0
+        ts_stats["coverage"] = round(coverage, 3)
+        if n_text and coverage < 0.9:
+            log(f"⚠️ 字幕に残った文字が本文の {coverage * 100:.0f}% です(タイムスタンプ付けで欠けた可能性。_review.md を確認してください)")
+        n_flag = sum(1 for r in results if r.flags)  # タイムスタンプ付けで付いたフラグ(trimmed)も数える
         if not quiet:
             src_j = {"aligner": "アライナー", "engine": "モデル固有", "approx": "概算"}
-            log(f"[4/6] タイムスタンプ {len(words)} 語 (" + ", ".join(f"{src_j.get(k, k)} {v}" for k, v in ts_stats.items()) + ")")
+            log(f"[4/6] タイムスタンプ {len(words)} 語 (" + ", ".join(f"{src_j.get(k, k)} {v}" for k, v in ts_stats.items()
+                                                              if k in src_j) + f", 本文との一致 {coverage * 100:.0f}%)")
 
         # 6) 話者
         turns: List[List[Any]] = []
@@ -753,6 +767,10 @@ class Session:
             row["x_realtime"] = o["duration"] / max(row["asr_sec"] or wall, 1e-6)
             if ref:
                 row["cer"] = core.cer(ref, text)
+                row["terms"] = core.term_recall(ref, text, st.context_terms) if st.context_terms else None
+                row["numbers"] = core.number_recall(ref, text)
+            elif st.context_terms:
+                row["terms_found"] = sum(text.count(t) for t in st.context_terms)
             rows.append(row)
             main_key = self.preset_of(st).key if st.preset else ""
             if not keep_loaded and p.key != main_key:  # 本番で使うモデルは残しておく
@@ -777,21 +795,32 @@ class Session:
         return rows
 
 
+def _ratio(x: Optional[Tuple[int, int]]) -> str:
+    if not x or not x[1]:
+        return "-"
+    return f"{x[0]}/{x[1]}"
+
+
 def compare_table_html(rows: List[Dict[str, Any]], has_ref: bool) -> str:
-    th = "<tr><th>モデル</th><th>処理時間</th><th>倍速</th><th>VRAM峰</th>" + ("<th>CER</th>" if has_ref else "<th>1行目との差</th>") + "<th>要確認</th><th>冒頭</th></tr>"
+    th = ("<tr><th>モデル</th><th>処理時間</th><th>倍速</th><th>VRAM峰</th>"
+          + ("<th>CER</th><th>用語</th><th>数字</th>" if has_ref else "<th>1行目との差</th><th>用語の出現</th>")
+          + "<th>要確認</th><th>冒頭</th></tr>")
     trs = []
     for r in rows:
         if "error" in r:
-            trs.append(f"<tr><td>{html.escape(r['label'])}</td><td colspan=6 style='color:#c00'>{html.escape(r['error'][:200])}</td></tr>")
+            trs.append(f"<tr><td>{html.escape(r['label'])}</td><td colspan=8 style='color:#c00'>{html.escape(r['error'][:200])}</td></tr>")
             continue
         metric = r.get("cer") if has_ref else r.get("diff_vs_first")
         mtxt = "-" if metric is None else f"{metric * 100:.1f}%"
+        extra = (f"<td>{_ratio(r.get('terms'))}</td><td>{_ratio(r.get('numbers'))}</td>" if has_ref
+                 else f"<td>{r.get('terms_found', '-')}</td>")
         trs.append(
             f"<tr><td>{html.escape(r['label'])}</td><td>{(r.get('asr_sec') or 0):.1f}秒</td><td>x{r['x_realtime']:.0f}</td>"
-            f"<td>{r.get('gpu_peak_gb') or '-'}</td><td><b>{mtxt}</b></td><td>{r.get('flags', 0)}</td>"
+            f"<td>{r.get('gpu_peak_gb') or '-'}</td><td><b>{mtxt}</b></td>{extra}<td>{r.get('flags', 0)}</td>"
             f"<td style='max-width:520px'>{html.escape(r['text'][:160])}…</td></tr>")
     return ("<table style='border-collapse:collapse;font-size:13px' border=1 cellpadding=4>" + th + "".join(trs) + "</table>"
-            + ("<div style='font-size:12px;color:#666'>CER は句読点・空白を除き NFKC 正規化した文字誤り率(低いほど良い)。</div>" if has_ref else
+            + ("<div style='font-size:12px;color:#666'>CER は句読点・空白を除き NFKC 正規化した文字誤り率(低いほど良い)。"
+               "用語 = 正解に出てくる context の語を正しく書けた数、数字 = 正解の数字を同じ形で書けた数(金額・日付の取り違えの目安)。</div>" if has_ref else
                "<div style='font-size:12px;color:#666'>正解テキストがないので、1行目のモデルとの文字の食い違い率を参考表示しています(どちらが正しいかは分かりません)。</div>"))
 
 
@@ -874,19 +903,28 @@ def show_review(out: Dict[str, Any], max_items: int = 8) -> None:
     items = core.review_items(out.get("results") or [])
     if not items:
         return
+    groups: List[List[core.ClipResult]] = []  # 2分割したものは元のクリップごとにまとめる
+    for r in items:
+        if r.clip.parent is not None and groups and groups[-1][0].clip.parent == r.clip.parent:
+            groups[-1].append(r)
+        else:
+            groups.append([r])
     rows = []
-    for r in items[:max_items]:
-        c = r.clip
-        why = "、".join(core.FLAG_JA.get(f, f) for f in r.flags) if r.flags else "自動で差し替え済み"
-        alts = "".join(
-            f"<div style='color:#666'>候補({html.escape(a.get('model') or ('context あり' if a.get('ctx') else 'context なし'))}): "
-            f"{html.escape((a.get('text') or '(空)')[:200])}</div>" for a in r.attempts if "text" in a and a.get("text") != r.text)
+    for g in groups[:max_items]:
+        a0, a1 = g[0].clip.start, g[-1].clip.end
+        flags = [f for r in g for f in r.flags]
+        why = "、".join(dict.fromkeys(core.FLAG_JA.get(f, f) for f in flags)) if flags else "自動で差し替え済み"
+        adopted = "".join(r.text for r in g)
+        first = next((a.get("text") for a in g[0].attempts if "text" in a), adopted) or ""
+        body = (f"<div style='line-height:1.7'>{core.diff_html(first, adopted)}</div>"
+                "<div style='color:#888;font-size:11px'>赤=最初の結果から消えた / 緑=差し替えで増えた</div>"
+                if first != adopted else f"<div>{html.escape(adopted[:300] or '(空)')}</div>")
         rows.append(
-            f"<tr><td style='white-space:nowrap'>{core.fmt_hms(c.start)}〜{core.fmt_hms(c.end)}</td>"
-            f"<td>{_clip_audio_html(out['wav'], c.start, c.end)}</td><td><b>{html.escape(why)}</b>"
-            f"<div>{html.escape(r.text[:300] or '(空)')}</div>{alts}</td></tr>")
-    more = f"<div>ほか {len(items) - max_items} 件は {html.escape(out['paths'].get('review', ''))} を見てください</div>" if len(items) > max_items else ""
-    display(HTML(f"<details open><summary><b>要確認 {len(items)} 件</b>(音声を聞いて確かめられます)</summary>"
+            f"<tr><td style='white-space:nowrap'>{core.fmt_hms(a0)}〜{core.fmt_hms(a1)}</td>"
+            f"<td>{_clip_audio_html(out['wav'], a0, a1)}</td><td><b>{html.escape(why)}</b>{body}</td></tr>")
+    more = (f"<div>ほか {len(groups) - max_items} 件は {html.escape(out['paths'].get('review', ''))} を見てください</div>"
+            if len(groups) > max_items else "")
+    display(HTML(f"<details open><summary><b>要確認 {len(groups)} 件</b>(音声を聞いて確かめられます)</summary>"
                  f"<table border=1 cellpadding=4 style='border-collapse:collapse;font-size:13px'>{''.join(rows)}</table>{more}</details>"))
 
 
@@ -923,8 +961,12 @@ def _minutes_request(text: str, style: str, glossary: Sequence[str] = ()) -> Tup
 
 
 def make_minutes(transcript: str, *, style: str = "議事録（決定事項・TODO つき）", mode: str = "プロンプトだけ作る",
-                 model: str = "claude-opus-5", glossary: Sequence[str] = (), out_path: str = "") -> Optional[str]:
-    """文字起こし(ファイルパス or 本文)から議事録を作る。書き出したファイルのパスを返す"""
+                 model: str = "claude-opus-5", glossary: Sequence[str] = (), out_path: str = "",
+                 gemini_model: str = "google/gemini-3.5-flash") -> Optional[str]:
+    """文字起こし(ファイルパス or 本文)から議事録を作る。書き出したファイルのパスを返す
+
+    mode: "プロンプトだけ作る" / "Gemini（Colab AI・無料）" / "Claude API"
+    """
     src_path = transcript if os.path.isfile(transcript) else ""
     text = open(src_path, encoding="utf-8").read() if src_path else transcript
     if not text.strip():
@@ -937,6 +979,25 @@ def make_minutes(transcript: str, *, style: str = "議事録（決定事項・TO
         with open(pth, "w", encoding="utf-8") as f:
             f.write(MINUTES_SYSTEM + "\n\n" + instr + "\n\n" + tr + "\n")
         log(f"📝 プロンプトを書き出しました: {pth}\n   中身をまるごと Claude / ChatGPT に貼り付けてください(約 {len(text):,} 文字)")
+        return pth
+
+    if mode.startswith("Gemini"):
+        # Colab に組み込みの google.colab.ai(API キー不要。2026年6月から全ユーザー無料)
+        try:
+            from google.colab import ai
+        except Exception as e:
+            raise RuntimeError(f"google.colab.ai が使えません(Colab の画面から実行してください): {e}")
+        log(f"🤖 {gemini_model}(Colab AI)で作成中…")
+        chunks: List[str] = []
+        for piece in ai.generate_text(MINUTES_SYSTEM + "\n\n" + instr + "\n\n" + tr, model_name=gemini_model, stream=True):
+            if piece:
+                print(piece, end="", flush=True)
+                chunks.append(piece)
+        print()
+        pth = out_path or base + "_minutes.md"
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write("".join(chunks))
+        log(f"✅ 議事録を書き出しました: {pth}")
         return pth
 
     # ---- Claude API ----

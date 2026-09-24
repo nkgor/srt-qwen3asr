@@ -36,7 +36,9 @@
 | Cohere Transcribe × vLLM | vLLM | L4/A100/H100 | |
 | Whisper large-v3 / large-v3-turbo | faster-whisper | T4〜 | 定番 |
 | kotoba-whisper v2.0 | faster-whisper | T4〜 | 日本語特化の Whisper |
-| Parakeet TDT-CTC 0.6B ja | NeMo | T4〜 | NVIDIA の日本語専用。とても速い |
+| Parakeet TDT-CTC 0.6B ja | NeMo | T4〜 | NVIDIA の日本語専用。とても速い（JSUT の CER 6.60% の報告）。句読点は少なめ |
+| Granite Speech 4.1 2B（実験的） | transformers | T4〜 | IBM・2026年4月。日本語対応。context の語をキーワードとして渡す（入れすぎ注意） |
+| VibeVoice-ASR 8B（実験的） | transformers | 24GB〜 | Microsoft・2026年。50以上の言語・context 対応（ここでは本文だけ使う） |
 | カスタム | 任意 | | Hugging Face のモデル ID とエンジンを指定 |
 
 タイムスタンプはどのモデルでも **Qwen3-ForcedAligner-0.6B** で付け直すので、字幕の品質はそろいます（モデル自身のタイムスタンプを使う設定もあり）。
@@ -73,8 +75,11 @@
 - フォルダ一括・ワイルドカード・アップロード、動画もOK（ffmpeg）、ステレオの左右選択、音量/ノイズのフィルタ
 
 **おまけ**
-- ⑥ モデル比較（速度・VRAM・CER・差分表示）
-- ⑦ 議事録づくり（プロンプトを作るだけ / Claude API）
+- ⑥ モデル比較（速度・VRAM・CER・用語と数字の聞き取り率・差分表示）。正解テキストは比べる区間と同じ範囲のものを使う
+- ⑦ 議事録づくり（プロンプトを作るだけ / Colab に組み込みの Gemini（無料・キー不要）/ Claude API）
+
+**ほかの選択肢（このノートブックには入れていないもの）**
+- API で使う文字起こし: Shisa Real-time ASR API（用語集あり）、Meta Muse Voice Transcribe、Voxtral Transcribe 2（Mistral API）、Qwen3-ASR-Flash（DashScope）など。会議音声を外部に送れるなら候補
 
 ## 開発
 

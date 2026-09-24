@@ -492,6 +492,94 @@ class CohereASREngine(Engine):
         super().close()
 
 
+class GraniteSpeechEngine(Engine):
+    """IBM Granite Speech 4.1 2B(英・仏・独・西・葡・日)。キーワード(固有名詞)を渡せる。
+    プロンプトは英語で書く決まり(モデルカードより)。transformers の hf 環境で動かす"""
+
+    kind = "granite"
+
+    def __init__(self, model: str = "ibm-granite/granite-speech-4.1-2b", dtype: str = "auto", batch_size: int = 8,
+                 max_new_tokens: int = 448, **opt: Any) -> None:
+        super().__init__(model=model, batch_size=batch_size, **opt)
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+        self.proc = AutoProcessor.from_pretrained(model)
+        self.tok = self.proc.tokenizer
+        self.m = AutoModelForSpeechSeq2Seq.from_pretrained(model, device_map=device_str(), dtype=pick_dtype(dtype))
+        self.m.eval()
+        self.max_new_tokens = int(max_new_tokens)
+        self.ctx_terms: List[str] = []
+
+    def _prompt(self, use_kw: bool) -> str:
+        if use_kw and self.ctx_terms:
+            q = "transcribe the speech to text. Keywords: " + ", ".join(self.ctx_terms)
+        else:
+            q = "transcribe the speech with proper punctuation and capitalization."
+        return self.tok.apply_chat_template([{"role": "user", "content": "<|audio|>" + q}], tokenize=False,
+                                            add_generation_prompt=True)
+
+    def transcribe(self, items, language):
+        torch = torch_mod()
+        out: List[Dict[str, Any]] = []
+        for a, ctx in items:  # プロンプトが違うことがあるので1件ずつ(2B なので十分速い)
+            wav = torch.from_numpy(_pad_min(a)).unsqueeze(0)
+            inp = self.proc(self._prompt(bool(ctx)), wav, device=device_str(), return_tensors="pt").to(device_str())
+            with torch.inference_mode():
+                ids = self.m.generate(**inp, max_new_tokens=self.max_new_tokens, do_sample=False, num_beams=1)
+            n = inp["input_ids"].shape[-1]
+            text = self.tok.batch_decode(ids[:, n:], add_special_tokens=False, skip_special_tokens=True)[0]
+            out.append({"text": (text or "").strip(), "language": language or ""})
+        return out
+
+    def close(self) -> None:
+        del self.m
+        super().close()
+
+
+class VibeVoiceEngine(Engine):
+    """Microsoft VibeVoice-ASR(8B、50以上の言語、context を渡せる)。transformers ネイティブ版(-HF)を使う。
+    本来は60分を一気に読んで話者も付けられるモデルだが、ここでは他のモデルと同じくクリップ単位で本文だけ使う"""
+
+    kind = "vibevoice"
+
+    def __init__(self, model: str = "microsoft/VibeVoice-ASR-HF", dtype: str = "auto", batch_size: int = 4,
+                 max_new_tokens: int = 2048, **opt: Any) -> None:
+        super().__init__(model=model, batch_size=batch_size, **opt)
+        import transformers
+        from transformers import AutoProcessor
+
+        cls = getattr(transformers, "VibeVoiceAsrForConditionalGeneration")
+        self.proc = AutoProcessor.from_pretrained(model)
+        self.m = cls.from_pretrained(model, device_map=device_str(), dtype=pick_dtype(dtype))
+        self.m.eval()
+        self.max_new_tokens = int(max_new_tokens)
+        self.tmp = tempfile.mkdtemp(prefix="vibevoice_")
+
+    def _run(self, chunk):
+        torch = torch_mod()
+        paths = []
+        for i, (a, _) in enumerate(chunk):
+            p = os.path.join(self.tmp, f"{i}.wav")
+            core.write_wav16(p, _pad_min(a))
+            paths.append(p)
+        prompts = [c or None for _, c in chunk]
+        inputs = self.proc.apply_transcription_request(paths, prompt=prompts).to(self.m.device, self.m.dtype)
+        with torch.inference_mode():
+            out = self.m.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        gen = out[:, inputs["input_ids"].shape[1]:]
+        texts = self.proc.decode(gen, return_format="transcription_only")
+        if isinstance(texts, str):
+            texts = [texts]
+        return [{"text": (t or "").strip(), "language": ""} for t in texts]
+
+    def transcribe(self, items, language):
+        return with_oom_backoff(self._run, items, self.batch_size, log=_log)
+
+    def close(self) -> None:
+        del self.m
+        super().close()
+
+
 class PyannoteDiarizer:
     """pyannote.audio 4.x の話者分離(community-1 は exclusive 出力もあり)"""
 
@@ -693,6 +781,8 @@ ENGINE_CLASSES = {
     "hf-pipeline": HFPipelineEngine,
     "hf-speechlm": HFSpeechLMEngine,
     "cohere": CohereASREngine,
+    "granite": GraniteSpeechEngine,
+    "vibevoice": VibeVoiceEngine,
     "aligner": QwenAligner,
     "pyannote": PyannoteDiarizer,
 }

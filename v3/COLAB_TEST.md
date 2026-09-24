@@ -61,6 +61,6 @@ colab --auth adc stop -s asr
 - [ ] flash-attn の whl が合うか（合わなければ sdpa で動くこと）
 - [ ] ⑤ Qwen3-ASR 1.7B ＋ 話者分離で、txt / srt / vtt / json / csv / md / plain / rttm / review が出る
 - [ ] CER（`/content/e2e/meeting_cv8.ref.txt` と比べる）と速度（何倍速か）
-- [ ] ⑥ の比較表: Qwen 1.7B / JA 版 / 0.6B / Cohere / Whisper turbo / kotoba / Parakeet / vLLM
+- [ ] ⑥ の比較表: Qwen 1.7B / JA 版 / 0.6B / Cohere / Granite / VibeVoice / Whisper turbo / kotoba / Parakeet / vLLM（Qwen・Cohere）
 - [ ] vLLM サーバーが起動して、Qwen3-ASR を高速に処理できるか（`vllm` のバージョンと CUDA の相性）
 - [ ] ⑧ で VRAM がちゃんと解放されるか

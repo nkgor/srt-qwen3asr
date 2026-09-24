@@ -22,8 +22,9 @@ OUT = os.environ.get("E2E_OUT", "/content/e2e_out")
 NB = os.environ.get("E2E_NB", "/content/Qwen3-ASR_v3.ipynb")
 MINUTES = float(os.environ.get("E2E_MINUTES", "6"))
 ENGINES = os.environ.get("E2E_ENGINES", "qwen,pyannote,vllm,fw,nemo,hf").split(",")
-COMPARE = os.environ.get("E2E_COMPARE", "qwen3-1.7b,qwen3-1.7b-ja,qwen3-0.6b,cohere-transcribe,whisper-large-v3-turbo,"
-                                        "kotoba-whisper-v2,parakeet-ja,qwen3-1.7b-vllm").split(",")
+COMPARE = os.environ.get("E2E_COMPARE", "qwen3-1.7b,qwen3-1.7b-ja,qwen3-0.6b,cohere-transcribe,granite-speech-4.1,"
+                                        "vibevoice-asr,whisper-large-v3-turbo,kotoba-whisper-v2,parakeet-ja,"
+                                        "qwen3-1.7b-vllm,cohere-transcribe-vllm").split(",")
 os.makedirs(E2E, exist_ok=True)
 os.makedirs(OUT, exist_ok=True)
 

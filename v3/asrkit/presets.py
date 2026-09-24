@@ -41,9 +41,9 @@ ENV_SPECS: Dict[str, EnvSpec] = {
     ),
     "hf": EnvSpec(
         name="hf",
-        packages=["transformers>=5.5", "accelerate", "librosa", "soundfile", "mistral-common[audio]", "sentencepiece"],
+        packages=["transformers>=5.5", "accelerate", "librosa", "soundfile", "sentencepiece"],
         check="import transformers, torch; print(f'transformers {transformers.__version__} / torch {torch.__version__}')",
-        note="最新 transformers の音声モデル(実験的)",
+        note="最新 transformers の音声モデル(Cohere / Granite / VibeVoice / カスタム)",
     ),
     "pyannote": EnvSpec(
         name="pyannote",
@@ -102,11 +102,17 @@ PRESETS: List[Preset] = [
     Preset("whisper-large-v3", "Whisper large-v3（faster-whisper）", "faster-whisper", "fw", "large-v3",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番の最高精度版"),
     Preset("kotoba-whisper-v2", "kotoba-whisper v2.0（日本語特化 Whisper）", "faster-whisper", "fw",
-           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5}, native_ts=True, license="Apache-2.0",
+           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5}, native_ts=True, license="MIT",
            note="ReazonSpeech で学習した日本語特化の蒸留モデル"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
-           options={"batch_size": 16}, context=False, native_ts=True, license="CC-BY-4.0",
-           note="とても速い日本語専用モデル。句読点あり"),
+           options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
+           note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。句読点は少なめ"),
+    Preset("granite-speech-4.1", "Granite Speech 4.1 2B（IBM・実験的）", "granite", "hf", "ibm-granite/granite-speech-4.1-2b",
+           options={"batch_size": 8}, ja="○", punctuates=False, license="Apache-2.0",
+           note="日本語対応の2B(2026年4月)。context の語をキーワードとして渡すが、関係ない所にも入れがちなので語は少なめに"),
+    Preset("vibevoice-asr", "VibeVoice-ASR 8B（Microsoft・実験的）", "vibevoice", "hf", "microsoft/VibeVoice-ASR-HF",
+           options={"batch_size": 4}, ja="○", gpu="A100/H100/L4(24GB〜)", license="MIT",
+           note="50以上の言語・context 対応の8B。本来は60分一気読み＋話者付けのモデル"),
 ]
 
 
@@ -147,7 +153,8 @@ def custom_preset(engine: str, model: str, env: Optional[str] = None) -> Preset:
     """フォームの「カスタム」用: エンジン名と HF のモデル ID から作る"""
     engine = engine.strip()
     env = env or {"qwen": "qwen", "vllm": "vllm", "faster-whisper": "fw", "nemo": "nemo",
-                  "hf-pipeline": "hf", "hf-speechlm": "hf"}.get(engine, "hf")
+                  "hf-pipeline": "hf", "hf-speechlm": "hf", "cohere": "hf", "granite": "hf",
+                  "vibevoice": "hf"}.get(engine, "hf")
     return Preset(f"custom:{engine}:{model}", f"カスタム {engine}: {model}", engine, env, model.strip(),
                   native_ts=engine in ("faster-whisper", "nemo"), ja="?", note="カスタム")
 
