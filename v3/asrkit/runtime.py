@@ -489,6 +489,7 @@ class VLLMServer:
         self.extra_args = list(extra_args)
         self.extra_env = dict(extra_env or {})
         self.proc: Optional[subprocess.Popen] = None
+        self.start_sec: Optional[float] = None  # 起動にかかった秒数
         self.log_path = os.path.join(LOG_DIR, f"vllm_{model.replace('/', '__')}.log")
         self.base = f"http://127.0.0.1:{port}"
 
@@ -534,7 +535,8 @@ class VLLMServer:
             try:
                 with urllib.request.urlopen(self.base + "/health", timeout=5) as r:
                     if r.status == 200:
-                        log(f"✅ vLLM サーバー起動 ({core.fmt_dur(time.time() - t0)}): {self.model}")
+                        self.start_sec = round(time.time() - t0, 1)
+                        log(f"✅ vLLM サーバー起動 ({core.fmt_dur(self.start_sec)}): {self.model}")
                         return
             except Exception:
                 pass
@@ -618,7 +620,7 @@ class Handles:
         w = self.worker(env_name, extra_env)
         cur = w.loaded.get(key)
         if cur is not None and cur.get("options") == options and cur.get("kind") == kind:
-            return cur.get("info", {})
+            return dict(cur.get("info", {}), reused=True)  # 読み込み済み(load_sec は前に読み込んだときの値)
         if exclusive_group:
             for k, v in list(w.loaded.items()):
                 if v.get("group") == exclusive_group and k != key:

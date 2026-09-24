@@ -12,8 +12,7 @@ import glob
 import os
 import sys
 import tempfile
-import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -297,8 +296,11 @@ class FasterWhisperEngine(Engine):
     native_timestamps = True
 
     def __init__(self, model: str = "large-v3-turbo", compute_type: str = "auto", beam_size: int = 5,
-                 batch_size: int = 8, word_timestamps: Any = "auto", **opt: Any) -> None:
+                 batch_size: int = 8, word_timestamps: Any = "auto", chunk_length: Optional[int] = None,
+                 **opt: Any) -> None:
         super().__init__(model=model, batch_size=batch_size, **opt)
+        # kotoba-whisper は公式の使い方が chunk_length=15(15 秒の窓で読む)
+        self.chunk_length = int(chunk_length) if chunk_length else None
         # 蒸留モデル(kotoba-whisper / distil-whisper。デコーダが 2 層)は、変換時に入った large-v3 用の
         # alignment_heads が存在しない層を指していて、単語タイムスタンプ(find_alignment)で segfault する。
         # その場合は単語時刻を出さず、Qwen3-ForcedAligner でタイムスタンプを付ける
@@ -330,6 +332,7 @@ class FasterWhisperEngine(Engine):
                 word_timestamps=self.word_ts, vad_filter=False, condition_on_previous_text=False,
                 temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0), compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0, no_speech_threshold=0.6,
+                **({"chunk_length": self.chunk_length} if self.chunk_length else {}),
             )
             segs = list(segs)
             text = "".join(s.text for s in segs).strip()
@@ -540,17 +543,27 @@ class GraniteSpeechEngine(Engine):
         return self.tok.apply_chat_template([{"role": "user", "content": "<|audio|>" + q}], tokenize=False,
                                             add_generation_prompt=True)
 
-    def transcribe(self, items, language):
+    def _run(self, chunk: List[Tuple[np.ndarray, str]]) -> List[Dict[str, Any]]:
         torch = torch_mod()
-        out: List[Dict[str, Any]] = []
-        for a, ctx in items:  # プロンプトが違うことがあるので1件ずつ(2B なので十分速い)
-            wav = torch.from_numpy(_pad_min(a)).unsqueeze(0)
-            inp = self.proc(self._prompt(bool(ctx)), wav, device=device_str(), return_tensors="pt").to(device_str())
-            with torch.inference_mode():
-                ids = self.m.generate(**inp, max_new_tokens=self.max_new_tokens, do_sample=False, num_beams=1)
-            n = inp["input_ids"].shape[-1]
-            text = self.tok.batch_decode(ids[:, n:], add_special_tokens=False, skip_special_tokens=True)[0]
-            out.append({"text": (text or "").strip(), "language": language or ""})
+        prompt = self._prompt(bool(chunk[0][1]))  # chunk の中はプロンプトが同じ
+        wavs = [_pad_min(a) for a, _ in chunk]  # 長さが違っても processor が詰めてくれる(トークナイザは左詰め)
+        inp = self.proc([prompt] * len(wavs), wavs, device=device_str(), return_tensors="pt").to(device_str())
+        with torch.inference_mode():
+            ids = self.m.generate(**inp, max_new_tokens=self.max_new_tokens, do_sample=False, num_beams=1)
+        n = inp["input_ids"].shape[-1]
+        texts = self.tok.batch_decode(ids[:, n:], add_special_tokens=False, skip_special_tokens=True)
+        return [{"text": (t or "").strip()} for t in texts]
+
+    def transcribe(self, items, language):
+        # キーワードあり/なしでプロンプトが違うので、それぞれまとめてバッチ処理(以前は1件ずつで遅かった)
+        out: List[Dict[str, Any]] = [{} for _ in items]
+        for use_kw in (True, False):
+            idx = [i for i, (_, c) in enumerate(items) if bool(c) == use_kw]
+            if not idx:
+                continue
+            res = with_oom_backoff(self._run, [items[i] for i in idx], self.batch_size, log=_log)
+            for i, r in zip(idx, res):
+                out[i] = {"text": r["text"], "language": language or ""}
         return out
 
     def close(self) -> None:

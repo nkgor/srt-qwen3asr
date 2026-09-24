@@ -77,6 +77,10 @@ class Preset:
     punctuates: bool = True
     context: bool = True  # context(固有名詞のヒント)を使えるか
     native_ts: bool = False
+    # クリップの区切り方のおすすめ(None = ふつう: 30 秒まで・6 秒以下の無音はつなぐ)。
+    # 長いクリップや途中の無音で発話を読み飛ばしやすいモデルは短めにする。④ で「自動」のときだけ使う
+    max_clip: Optional[float] = None
+    max_gap: Optional[float] = None
     gpu: str = "T4〜"  # 目安
     license: str = ""
     note: str = ""
@@ -102,9 +106,10 @@ PRESETS: List[Preset] = [
     Preset("whisper-large-v3", "Whisper large-v3（faster-whisper）", "faster-whisper", "fw", "large-v3",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番の最高精度版"),
     Preset("kotoba-whisper-v2", "kotoba-whisper v2.0（日本語特化 Whisper）", "faster-whisper", "fw",
-           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False}, license="MIT",
-           note="ReazonSpeech で学習した日本語特化の蒸留モデル(タイムスタンプはアライナーで付ける。"
-                "faster-whisper の単語時刻はこのモデルだと segfault するため)"),
+           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False, "chunk_length": 15},
+           max_clip=15.0, license="MIT",
+           note="ReazonSpeech で学習した日本語特化の蒸留モデル。公式のおすすめどおり 15 秒ずつ読む"
+                "(タイムスタンプはアライナーで付ける。faster-whisper の単語時刻はこのモデルだと segfault するため)"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
            options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
            note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。句読点は少なめ"),
@@ -118,9 +123,11 @@ PRESETS: List[Preset] = [
 
 
 # flash-attn の配布済み whl(torch のバージョン, Python タグ) → URL。無ければ sdpa で動く
+# (torch 2.11 用は公式の whl が無いので、CUDA 12.8 でビルドされたコミュニティ版。Colab のカーネルは 3.12 → 3.13 に変わった)
+_FA_211 = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/"
 FLASH_WHEELS: Dict[tuple, str] = {
-    ("2.11", "cp312"): "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/"
-                       "flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    ("2.11", tag): f"{_FA_211}flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-{tag}-{tag}-linux_x86_64.whl"
+    for tag in ("cp312", "cp313")
 }
 
 

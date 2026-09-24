@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -11,7 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from asrkit import core  # noqa: E402
-from asrkit.core import Clip, ClipResult, RetryPolicy, Word  # noqa: E402
+from asrkit.core import Clip, ClipResult, Word  # noqa: E402
 
 
 # ------------------------------------------------------------------ 時刻
@@ -344,3 +343,24 @@ def test_term_and_number_recall():
     hyp = "山田さんは3月6日に1,200円払いました。中田さんは三回来ました。"
     assert core.term_recall(ref, hyp, ["山田", "田中"]) == (1, 2)
     assert core.number_recall(ref, hyp) == (3, 4)  # 3, 1,200, 三 は合う / 5 が 6 に
+
+
+def test_drop_runs_counts_skipped_utterances():
+    ref = "今日は良い天気ですね。明日は雨が降るでしょう。午後から会議です。"
+    assert core.drop_runs(ref, ref) == (0, 0)
+    # 真ん中の文を丸ごと読み飛ばした
+    n, chars = core.drop_runs(ref, "今日は良い天気ですね。午後から会議です。")
+    assert n == 1 and chars == len(core.normalize_for_cer("明日は雨が降るでしょう"))
+    # 数文字の言い間違いは「抜け」ではない
+    assert core.drop_runs(ref, "今日はいい天気ですね。明日は雨がふるでしょう。午後から会議です。") == (0, 0)
+    # 偶然そろった字(「は」など)をはさんでも、ひと続きの抜けとして数える
+    ref2 = "わたしはきのう図書館で本を借りました。あなたは何をしていましたか。"
+    n2, c2 = core.drop_runs(ref2, "わたしはきのう図書館で本を借りました。は。")
+    assert n2 == 1 and c2 >= 12
+
+
+def test_negation_check():
+    ref = "今日は行かない。雨は降りません。"
+    assert core.negation_check(ref, ref) == (2, 2, 0)
+    assert core.negation_check(ref, "今日は行く。雨は降りません。") == (1, 2, 0)  # 「行かない」→「行く」(意味が反転)
+    assert core.negation_check("明日は行く。", "明日は行かない。") == (0, 0, 1)  # 正解に無い否定が出た

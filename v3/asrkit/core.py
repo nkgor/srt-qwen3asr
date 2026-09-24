@@ -795,6 +795,74 @@ def number_recall(ref: str, hyp: str) -> Tuple[int, int]:
     return hit, tot
 
 
+def align_opcodes(ref: str, hyp: str) -> List[Tuple[str, int, int, int, int]]:
+    """ref → hyp の編集手順 (tag, ref の範囲, hyp の範囲)。tag は equal / replace / delete / insert"""
+    try:
+        from rapidfuzz.distance import Levenshtein  # type: ignore
+
+        return [(o.tag, o.src_start, o.src_end, o.dest_start, o.dest_end) for o in Levenshtein.opcodes(ref, hyp)]
+    except Exception:
+        import difflib
+
+        return [tuple(x) for x in difflib.SequenceMatcher(None, ref, hyp, autojunk=False).get_opcodes()]  # type: ignore
+
+
+def _ref_status(r: str, h: str) -> List[str]:
+    """正解の1文字ごとに「そのまま残った(=) / 別の字になった(s) / 抜けた(d)」"""
+    st = ["d"] * len(r)
+    for tag, a0, a1, b0, b1 in align_opcodes(r, h):
+        if tag == "equal":
+            st[a0:a1] = ["="] * (a1 - a0)
+        elif tag == "replace":
+            k = min(a1 - a0, b1 - b0)
+            st[a0:a0 + k] = ["s"] * k  # 長さが違う置き換えは、あまった正解側を「抜けた」とみなす
+    return st
+
+
+def drop_runs(ref: str, hyp: str, min_len: int = 8, bridge: int = 2) -> Tuple[int, int]:
+    """正解にあるのに文字起こしからまとめて抜けた箇所の (数, 字数)。発話の読み飛ばしの目安。
+    偶然一致した数文字(bridge 字まで)をはさんでいても、ひと続きの抜けとして数える"""
+    r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
+    st = _ref_status(r, h)
+    n = chars = 0
+    i = 0
+    while i < len(st):
+        if st[i] != "d":
+            i += 1
+            continue
+        j, lost, gap = i, 0, 0
+        while j < len(st) and gap <= bridge:
+            if st[j] == "d":
+                lost, gap = lost + 1, 0
+            else:
+                gap += 1
+            j += 1
+        if lost >= min_len:
+            n += 1
+            chars += lost
+        i = j
+    return n, chars
+
+
+_NEG = re.compile(r"ない|なかっ|なく|ません|ずに")
+
+
+def negation_check(ref: str, hyp: str) -> Tuple[int, int, int]:
+    """否定の言い回し(ない・なかった・なく・ません・ずに)が文字起こしでも同じ所に残ったか。
+    (残った数, 正解の数, 正解に無いのに文字起こしに出た数)。「しない」→「する」のような意味の反転の目安"""
+    r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
+    ops = align_opcodes(r, h)
+    rs = _ref_status(r, h)
+    hs = ["d"] * len(h)  # 文字起こし側: 正解と一致した字か
+    for tag, a0, a1, b0, b1 in ops:
+        if tag == "equal":
+            hs[b0:b1] = ["="] * (b1 - b0)
+    ref_neg = [m.span() for m in _NEG.finditer(r)]
+    hit = sum(1 for a, b in ref_neg if all(x == "=" for x in rs[a:b]))
+    extra = sum(1 for a, b in (m.span() for m in _NEG.finditer(h)) if not all(x == "=" for x in hs[a:b]))
+    return hit, len(ref_neg), extra
+
+
 def cer(ref: str, hyp: str) -> float:
     r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
     if not r:
