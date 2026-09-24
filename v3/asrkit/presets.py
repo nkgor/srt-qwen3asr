@@ -102,8 +102,9 @@ PRESETS: List[Preset] = [
     Preset("whisper-large-v3", "Whisper large-v3（faster-whisper）", "faster-whisper", "fw", "large-v3",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番の最高精度版"),
     Preset("kotoba-whisper-v2", "kotoba-whisper v2.0（日本語特化 Whisper）", "faster-whisper", "fw",
-           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5}, native_ts=True, license="MIT",
-           note="ReazonSpeech で学習した日本語特化の蒸留モデル"),
+           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False}, license="MIT",
+           note="ReazonSpeech で学習した日本語特化の蒸留モデル(タイムスタンプはアライナーで付ける。"
+                "faster-whisper の単語時刻はこのモデルだと segfault するため)"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
            options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
            note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。句読点は少なめ"),
@@ -156,7 +157,8 @@ def custom_preset(engine: str, model: str, env: Optional[str] = None) -> Preset:
                   "hf-pipeline": "hf", "hf-speechlm": "hf", "cohere": "hf", "granite": "hf",
                   "vibevoice": "hf"}.get(engine, "hf")
     return Preset(f"custom:{engine}:{model}", f"カスタム {engine}: {model}", engine, env, model.strip(),
-                  native_ts=engine in ("faster-whisper", "nemo"), ja="?", note="カスタム")
+                  native_ts=engine == "nemo" or (engine == "faster-whisper" and not any(
+                      k in model.lower() for k in ("kotoba", "distil"))), ja="?", note="カスタム")
 
 
 def envs_for(preset: Preset, diarize: bool, aligner: bool) -> List[str]:

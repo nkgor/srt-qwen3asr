@@ -222,11 +222,42 @@ def ensure_env(spec: EnvSpec, force: bool = False) -> EnvStatus:
             _run_logged([env_python(spec.name), "-m", "pip", "install", "--progress-bar", "off", *extra], logf, env)
     if rc != 0:
         return EnvStatus(spec.name, False, time.time() - t0, _tail(logp), logp)
+    if not spec.isolated:
+        _fix_google_namespace(spec.name)
     ok, info = check_env(spec)
     if ok:
         with open(marker, "w") as f:
             json.dump({"digest": spec.digest(), "time": time.time(), "info": info}, f)
-    return EnvStatus(spec.name, ok, time.time() - t0, info if ok else info + "\n" + _tail(logp), logp)
+    # 失敗時: インストールログの末尾 → 確認(import)のエラー の順(表示は末尾 3000 字なので、肝心のエラーを最後に)
+    return EnvStatus(spec.name, ok, time.time() - t0,
+                     info if ok else _tail(logp, 15) + "\n--- 確認(import)でのエラー ---\n" + info, logp)
+
+
+_GOOGLE_NS_PTH = (
+    "import sys, os, importlib.util, importlib.machinery; "
+    "_d = sys._getframe(1).f_locals.get('sitedir') or ''; "
+    "_s = importlib.machinery.PathFinder.find_spec('google', [_d]) if os.path.isdir(os.path.join(_d, 'google')) else None; "
+    "_s and ('google' not in sys.modules) and sys.modules.__setitem__('google', importlib.util.module_from_spec(_s))\n"
+)
+
+
+def _fix_google_namespace(name: str) -> None:
+    """システムの site-packages を見る venv で、venv に入れた google.* (protobuf など)が隠れないようにする
+
+    Colab には google_generativeai の *-nspkg.pth があり、起動時に `google` をシステム側のパスだけで作ってしまう。
+    すると venv に入れた新しい protobuf ではなくシステムの古い protobuf が読まれ、NeMo(onnx)が
+    「gencode 6.x / runtime 5.x」で落ちる。venv 側の .pth で先に venv の google/ を登録しておく
+    (システム側の nspkg.pth はそこへ自分のパスを足すだけになる)。
+    """
+    import glob
+
+    for sp in glob.glob(os.path.join(env_dir(name), "lib", "python3*", "site-packages")):
+        pth = os.path.join(sp, "_asr_v3_google_ns.pth")
+        if os.path.isdir(os.path.join(sp, "google")) and not os.path.exists(os.path.join(sp, "google", "__init__.py")):
+            with open(pth, "w") as f:
+                f.write(_GOOGLE_NS_PTH)
+        elif os.path.exists(pth):
+            os.remove(pth)
 
 
 def check_env(spec: EnvSpec) -> Tuple[bool, str]:
@@ -483,6 +514,10 @@ class VLLMServer:
         env = dict(os.environ)
         env.update(self.extra_env)
         env.setdefault("VLLM_LOGGING_LEVEL", "INFO")
+        # venv の bin(ninja など)を PATH に。FlashInfer のサンプラーは初回に JIT ビルドするが、
+        # Colab の nvcc(12.8)と vLLM の torch(cu13x)が合わず失敗しやすいので、PyTorch 版のサンプラーを使う
+        env["PATH"] = os.path.join(env_dir(self.env_name), "bin") + os.pathsep + env.get("PATH", "")
+        env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
         logf = open(self.log_path, "a", encoding="utf-8")
         logf.write(f"\n===== {time.ctime()} {' '.join(args)} =====\n")
         logf.flush()

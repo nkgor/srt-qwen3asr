@@ -32,7 +32,8 @@ os.makedirs(OUT, exist_ok=True)
 def build_audio() -> str:
     """CV8 の発話を 0.3〜2 秒の間でつなぐ(ところどころ長めの沈黙)。正解文も書く"""
     wav = os.path.join(E2E, "meeting_cv8.wav")
-    if os.path.exists(wav):
+    utts_path = os.path.join(E2E, "meeting_cv8.utts.json")
+    if os.path.exists(wav) and os.path.exists(utts_path):
         return wav
     pq_path = os.path.join(E2E, "cv8_test.parquet")
     if not os.path.exists(pq_path):
@@ -45,7 +46,7 @@ def build_audio() -> str:
     rows = pq.read_table(pq_path).to_pylist()
     random.seed(7)
     random.shuffle(rows)
-    sr, parts, refs, total = 16000, [], [], 0.0
+    sr, parts, refs, utts, total = 16000, [], [], [], 0.0
     for i, r in enumerate(rows):
         p = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-ac", "1", "-ar", "16000", "-f", "s16le",
                             "pipe:1"], input=r["audio"]["bytes"], capture_output=True)
@@ -55,6 +56,7 @@ def build_audio() -> str:
         gap = 7.0 if i % 25 == 24 else random.uniform(0.3, 2.0)
         parts += [x, np.zeros(int(gap * sr), np.int16)]
         refs.append(r["transcription"].strip().rstrip("."))
+        utts.append({"start": total, "end": total + len(x) / sr, "text": refs[-1]})
         total += len(x) / sr + gap
         if total > MINUTES * 60:
             break
@@ -66,12 +68,23 @@ def build_audio() -> str:
         w.setframerate(sr)
         w.writeframes(a.tobytes())
     open(os.path.join(E2E, "meeting_cv8.ref.txt"), "w", encoding="utf-8").write("".join(refs))
+    json.dump(utts, open(utts_path, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
     print(f"テスト音声: {len(a) / sr / 60:.1f} 分, {len(refs)} 発話")
     return wav
 
 
+def excerpt_ref(start: float, dur: float) -> str:
+    """⑥ の比較区間ぶんだけの正解文(発話の真ん中が区間に入るもの)。全体の正解と比べると CER が水増しされるため"""
+    utts = json.load(open(os.path.join(E2E, "meeting_cv8.utts.json"), encoding="utf-8"))
+    end = start + dur if dur > 0 else float("inf")
+    path = os.path.join(E2E, f"meeting_cv8.ref_{start:g}-{dur:g}.txt")
+    open(path, "w", encoding="utf-8").write("".join(u["text"] for u in utts if start <= (u["start"] + u["end"]) / 2 < end))
+    return path
+
+
 def main() -> int:
     wav = build_audio()
+    cmp_start, cmp_dur = 0.0, float(os.environ.get("E2E_CMP_SEC", "300"))
     sys.path.insert(0, "/content")
     import nb_run
 
@@ -84,8 +97,7 @@ def main() -> int:
                    "context": "田中 山田 松井", "vtt": True, "csv": True, "plain": True},
         "v3diar": {"diarize": "pyannote" in ENGINES, "rttm": True},
         "v3adv": {},
-        "v3cmp": {"start_sec": 0, "duration_sec": float(os.environ.get("E2E_CMP_SEC", "300")),
-                  "reference": os.path.join(E2E, "meeting_cv8.ref.txt")},
+        "v3cmp": {"start_sec": cmp_start, "duration_sec": cmp_dur, "reference": excerpt_ref(cmp_start, cmp_dur)},
         "v3min": {"mode": "プロンプトだけ作る"},
         "v3clean": {},
     }

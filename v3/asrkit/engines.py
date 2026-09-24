@@ -282,8 +282,15 @@ class FasterWhisperEngine(Engine):
     native_timestamps = True
 
     def __init__(self, model: str = "large-v3-turbo", compute_type: str = "auto", beam_size: int = 5,
-                 batch_size: int = 8, **opt: Any) -> None:
+                 batch_size: int = 8, word_timestamps: Any = "auto", **opt: Any) -> None:
         super().__init__(model=model, batch_size=batch_size, **opt)
+        # 蒸留モデル(kotoba-whisper / distil-whisper。デコーダが 2 層)は、変換時に入った large-v3 用の
+        # alignment_heads が存在しない層を指していて、単語タイムスタンプ(find_alignment)で segfault する。
+        # その場合は単語時刻を出さず、Qwen3-ForcedAligner でタイムスタンプを付ける
+        if word_timestamps == "auto":
+            word_timestamps = not any(k in model.lower() for k in ("kotoba", "distil"))
+        self.word_ts = bool(word_timestamps)
+        self.native_timestamps = self.word_ts
         _preload_nvidia_libs()
         from faster_whisper import WhisperModel
 
@@ -305,7 +312,7 @@ class FasterWhisperEngine(Engine):
         for a, ctx in items:
             segs, info = self.m.transcribe(
                 np.asarray(a, np.float32), language=code, beam_size=self.beam, initial_prompt=(ctx or None),
-                word_timestamps=True, vad_filter=False, condition_on_previous_text=False,
+                word_timestamps=self.word_ts, vad_filter=False, condition_on_previous_text=False,
                 temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0), compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0, no_speech_threshold=0.6,
             )
