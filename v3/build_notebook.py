@@ -77,7 +77,7 @@ INTRO = f"""
 <!-- 詳細（この行と末尾のコメント記号を外すと表示される）
 
 ## しくみ
-- 音声は ffmpeg で 16kHz モノラルに変換（動画もOK）→ VAD で発話区間 → 最大 {{max_clip}} 秒のクリップ
+- 音声は ffmpeg で 16kHz モノラルに変換（動画もOK）→ VAD で発話区間 → 最大 30 秒のクリップ（モデルによっては短め）
 - ASR は各モデル専用の venv の中の「ワーカー」プロセスで動く（カーネルは汚さない）
 - タイムスタンプは Qwen3-ForcedAligner（11言語）で全モデル共通に付ける
 - 話者分離は pyannote community-1 の exclusive 出力（重なりなし）を単語に割り当て
@@ -286,10 +286,10 @@ audio_filter = "なし"  #@param ["なし", "音量をそろえる (loudnorm)", 
 vad = "fireredvad"  #@param ["fireredvad", "silero", "energy", "none"]
 #@markdown **vad_threshold**: 発話と判定するしきい値（上げると厳しめ＝区間が減る）
 vad_threshold = 0.4  #@param {type:"slider", min:0.05, max:0.95, step:0.05}
-#@markdown **max_clip_sec**: 1回で ASR に渡す最大秒数（長いほど文脈が効くが重い。A100/H100 なら 60 も可）
-max_clip_sec = 30  #@param {type:"integer"}
-#@markdown **max_gap_sec**: これ以上の無音をはさむ発話は別クリップにする
-max_gap_sec = 6.0  #@param {type:"number"}
+#@markdown **max_clip_sec**: 1回で ASR に渡す最大秒数。「自動」はモデルのおすすめ（ふつう 30 秒。kotoba-whisper などは短め）。長いほど文脈が効くが重い
+max_clip_sec = "自動"  #@param ["自動", "10", "15", "20", "30", "45", "60"] {allow-input: true}
+#@markdown **max_gap_sec**: これより長い無音をはさむ発話は別クリップにする。「自動」はモデルのおすすめ（ふつう 6 秒）
+max_gap_sec = "自動"  #@param ["自動", "1", "2", "3", "6", "10"] {allow-input: true}
 #@markdown **overlap_sec**: ハード切り（長い発話の強制分割）の前後の重なり。重複は自動で除去
 overlap_sec = 1.0  #@param {type:"number"}
 #@markdown ### 推論
@@ -354,7 +354,8 @@ ST = pipeline.Settings(
     preset=("custom" if model == "カスタム" else model), custom_engine=custom_engine, custom_model=custom_model,
     language=language, batch_size=batch_size, max_new_tokens=max_new_tokens, aligner=aligner,
     channel=channel, af=_AF.get(audio_filter, audio_filter),
-    vad=vad, vad_threshold=vad_threshold, max_clip=max_clip_sec, max_gap=max_gap_sec, overlap=overlap_sec,
+    vad=vad, vad_threshold=vad_threshold, max_clip=pipeline.auto_num(max_clip_sec), max_gap=pipeline.auto_num(max_gap_sec),
+    overlap=overlap_sec,
     context_label=context_label, context_terms=_terms, retry=retry,
     replacements=_rep, fillers=fillers, halfwidth=halfwidth,
     cue_max_chars=cue_max_chars, cue_max_dur=cue_max_sec, cue_gap=cue_gap_sec, speaker_fmt=speaker_fmt,
@@ -398,6 +399,8 @@ def compare_cell() -> str:
     lines = [
         "#@title ⑥ モデル比較（おまけ）",
         "#@markdown 同じ区間を複数のモデルで文字起こしして、**速さ・VRAM・文字誤り率(CER)** を並べます。① で環境を入れたモデルだけ動きます",
+        "#@markdown 正解テキストがあれば、用語・数字・否定（「ない」「ません」）を正しく書けたか、発話を**丸ごと読み飛ばした所**がないかも数えます",
+        "#@markdown ④ のクリップ長が「自動」なら、モデルごとにおすすめの区切り方で読みます",
         "#@markdown 結果は出力先の `compare/` フォルダに（モデルごとの txt / srt / json）",
     ]
     names = []
@@ -474,7 +477,7 @@ def build() -> dict:
         ---
         ## おまけ
         - **⑥ モデル比較**: 同じ区間をいろいろなモデルで文字起こしして比べる
-        - **⑦ 議事録づくり**: 文字起こし結果から議事録を作る（プロンプトを作るだけ / Claude API）
+        - **⑦ 議事録づくり**: 文字起こし結果から議事録を作る（プロンプトを作るだけ / Colab の Gemini（無料）/ Claude API）
         - **⑨ Web UI**: ブラウザの画面でアップロード → 文字起こし（Gradio）
         """, "v3extra"),
         code(compare_cell(), "v3cmp"),

@@ -55,6 +55,22 @@ colab --auth adc stop -s asr
 
 うまくいかないときは `colab --auth adc log -s asr -o log.md` で実行履歴を取り出せます。
 
+### クリップの区切り方をモデルごとに比べる（`clip_sweep.py`）
+
+通しテストのあと（環境とテスト音声がある状態）で、モデルごとに `max_clip` / `max_gap` やエンジンの設定を変えて CER・読み飛ばした発話の数・速さを並べます。
+プリセットの「おすすめの区切り方」（`presets.py` の `max_clip` / `max_gap`）を決めるときに使います。
+
+```bash
+colab --auth adc upload -s asr v3/tools/colab_e2e.py /content/colab_e2e.py   # テスト音声と正解文を作る関数を使う
+colab --auth adc exec -s asr --timeout 5400 -f v3/tools/clip_sweep.py
+colab --auth adc download -s asr /content/sweep_out/sweep.md ./sweep.md
+```
+
+比べる組み合わせは環境変数 `SWEEP_VARIANTS`（`プリセット|max_clip|max_gap|オプション` を `;` 区切り）で変えられます。GPU がなくても CPU で同じ比較ができます（遅いだけで CER はほぼ同じ）。
+
+> ログイン情報（ADC）は、テストのあとに `gcloud auth application-default revoke` すると使えなくなります（`invalid_grant: Token has been expired or revoked`）。
+> 次にテストするときは、もう一度 `gcloud auth application-default login …` して `COLAB_ADC_JSON` を登録し直してください。
+
 カーネルが通しテストで埋まっている間も、**SSH** なら並行してログや venv を調べられます（`ssh` / `ssh-keygen` が要る。無ければ `apt-get install openssh-client`）:
 
 ```bash

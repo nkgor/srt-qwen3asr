@@ -592,6 +592,18 @@ def approx_tokens(text: str, start: float, end: float, speech: Sequence[Tuple[fl
     return out
 
 
+def join_texts(parts: Sequence[str]) -> str:
+    """区切って読んだ本文をつなぐ(英数字どうしの間だけ空白を入れる)"""
+    out = ""
+    for t in (p.strip() for p in parts):
+        if not t:
+            continue
+        if out and out[-1].isascii() and out[-1].isalnum() and t[0].isascii() and t[0].isalnum():
+            out += " "
+        out += t
+    return out
+
+
 def fix_ja_spaces(s: str) -> str:
     """日本語の文字どうしの間の余計な空白を消す(英単語の間の空白は残す)"""
     return _JA_SPACE.sub("", s)
@@ -793,6 +805,74 @@ def number_recall(ref: str, hyp: str) -> Tuple[int, int]:
     tot = sum(rn.values())
     hit = sum(min(c, hn.get(k, 0)) for k, c in rn.items())
     return hit, tot
+
+
+def align_opcodes(ref: str, hyp: str) -> List[Tuple[str, int, int, int, int]]:
+    """ref → hyp の編集手順 (tag, ref の範囲, hyp の範囲)。tag は equal / replace / delete / insert"""
+    try:
+        from rapidfuzz.distance import Levenshtein  # type: ignore
+
+        return [(o.tag, o.src_start, o.src_end, o.dest_start, o.dest_end) for o in Levenshtein.opcodes(ref, hyp)]
+    except Exception:
+        import difflib
+
+        return [tuple(x) for x in difflib.SequenceMatcher(None, ref, hyp, autojunk=False).get_opcodes()]  # type: ignore
+
+
+def _ref_status(r: str, h: str) -> List[str]:
+    """正解の1文字ごとに「そのまま残った(=) / 別の字になった(s) / 抜けた(d)」"""
+    st = ["d"] * len(r)
+    for tag, a0, a1, b0, b1 in align_opcodes(r, h):
+        if tag == "equal":
+            st[a0:a1] = ["="] * (a1 - a0)
+        elif tag == "replace":
+            k = min(a1 - a0, b1 - b0)
+            st[a0:a0 + k] = ["s"] * k  # 長さが違う置き換えは、あまった正解側を「抜けた」とみなす
+    return st
+
+
+def drop_runs(ref: str, hyp: str, min_len: int = 8, bridge: int = 2) -> Tuple[int, int]:
+    """正解にあるのに文字起こしからまとめて抜けた箇所の (数, 字数)。発話の読み飛ばしの目安。
+    偶然一致した数文字(bridge 字まで)をはさんでいても、ひと続きの抜けとして数える"""
+    r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
+    st = _ref_status(r, h)
+    n = chars = 0
+    i = 0
+    while i < len(st):
+        if st[i] != "d":
+            i += 1
+            continue
+        j, lost, gap = i, 0, 0
+        while j < len(st) and gap <= bridge:
+            if st[j] == "d":
+                lost, gap = lost + 1, 0
+            else:
+                gap += 1
+            j += 1
+        if lost >= min_len:
+            n += 1
+            chars += lost
+        i = j
+    return n, chars
+
+
+_NEG = re.compile(r"ない|なかっ|なく|ません|ずに")
+
+
+def negation_check(ref: str, hyp: str) -> Tuple[int, int, int]:
+    """否定の言い回し(ない・なかった・なく・ません・ずに)が文字起こしでも同じ所に残ったか。
+    (残った数, 正解の数, 正解に無いのに文字起こしに出た数)。「しない」→「する」のような意味の反転の目安"""
+    r, h = normalize_for_cer(ref), normalize_for_cer(hyp)
+    ops = align_opcodes(r, h)
+    rs = _ref_status(r, h)
+    hs = ["d"] * len(h)  # 文字起こし側: 正解と一致した字か
+    for tag, a0, a1, b0, b1 in ops:
+        if tag == "equal":
+            hs[b0:b1] = ["="] * (b1 - b0)
+    ref_neg = [m.span() for m in _NEG.finditer(r)]
+    hit = sum(1 for a, b in ref_neg if all(x == "=" for x in rs[a:b]))
+    extra = sum(1 for a, b in (m.span() for m in _NEG.finditer(h)) if not all(x == "=" for x in hs[a:b]))
+    return hit, len(ref_neg), extra
 
 
 def cer(ref: str, hyp: str) -> float:
@@ -1499,10 +1579,14 @@ def review_items(results: Sequence[ClipResult]) -> List[ClipResult]:
 
 
 def _attempt_line(a: Dict[str, Any]) -> str:
-    src = f"別モデル {a['model']}" if "model" in a else ("context あり" if a.get("ctx") else "context なし")
+    if "model" in a:
+        src = f"別モデル {a['model']}" + (f"・{a['pieces']} つに区切って" if a.get("pieces") else "")
+    else:
+        src = "context あり" if a.get("ctx") else "context なし"
     fl = a.get("flags") or []
     mark = f"  ⚠ {'、'.join(FLAG_JA.get(f, f) for f in fl)}" if fl else ""
-    return f"  - 候補({src}): {a['text'][:400] or '(空)'}{mark}"
+    rej = f"  （不採用: {a['rejected']}）" if a.get("rejected") else ""
+    return f"  - 候補({src}): {a['text'][:400] or '(空)'}{mark}{rej}"
 
 
 def to_review_md(results: Sequence[ClipResult], title: str) -> str:

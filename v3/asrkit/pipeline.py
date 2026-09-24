@@ -13,9 +13,6 @@ import hashlib
 import html
 import json
 import os
-import re
-import shutil
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -25,7 +22,7 @@ import numpy as np
 
 from . import core, runtime
 from .engines import ALIGNER_LANGS, lang_code, lang_name
-from .presets import ENV_SPECS, PRESETS, Preset, custom_preset, find_preset
+from .presets import Preset, custom_preset, find_preset
 
 VERSION = "3.0.0"
 log = runtime.log
@@ -65,8 +62,9 @@ class Settings:
     vad_min_silence: float = 0.2
     vad_pad: float = 0.2
     energy_top_db: float = 45.0
-    max_clip: float = 30.0
-    max_gap: float = 6.0
+    # クリップの区切り方。None = 自動(モデルのおすすめ。ふつうは 30 秒まで・6 秒以下の無音はつなぐ)
+    max_clip: Optional[float] = None
+    max_gap: Optional[float] = None
     overlap: float = 1.0
     # context
     context_label: str = "固有名詞・専門用語"
@@ -103,6 +101,25 @@ class Settings:
 
     def replace(self, **kw: Any) -> "Settings":
         return dataclasses.replace(self, **kw)
+
+
+DEFAULT_MAX_CLIP = 30.0
+DEFAULT_MAX_GAP = 6.0
+
+
+def auto_num(v: Any) -> Optional[float]:
+    """フォームの「自動」/空欄 → None、それ以外は数値"""
+    s = str(v if v is not None else "").strip()
+    if s in ("", "自動", "auto", "Auto", "AUTO", "None"):
+        return None
+    return float(s)
+
+
+def clip_settings(st: "Settings", p: Preset) -> "Settings":
+    """max_clip / max_gap が自動(None)なら、モデルのおすすめ値(無ければ 30 秒 / 6 秒)を入れた Settings を返す"""
+    mc = st.max_clip if st.max_clip else (p.max_clip or DEFAULT_MAX_CLIP)
+    mg = st.max_gap if st.max_gap is not None else (p.max_gap if p.max_gap is not None else DEFAULT_MAX_GAP)
+    return st.replace(max_clip=float(mc), max_gap=float(mg))
 
 
 def _sha(obj: Any, n: int = 16) -> str:
@@ -171,7 +188,7 @@ def vad_fireredvad(w: core.Wav16, st: Settings) -> List[Tuple[float, float]]:
     cfg = FireRedVadConfig(
         use_gpu=False, smooth_window_size=5, speech_threshold=float(st.vad_threshold),
         min_speech_frame=max(1, int(round(st.vad_min_speech * 100))),
-        max_speech_frame=max(200, int(st.max_clip * 100)),  # 長い発話は“間”の所で VAD 自身に割らせる
+        max_speech_frame=max(200, int((st.max_clip or DEFAULT_MAX_CLIP) * 100)),  # 長い発話は“間”の所で VAD 自身に割らせる
         min_silence_frame=max(1, int(round(st.vad_min_silence * 100))),
         merge_silence_frame=0, extend_speech_frame=0, chunk_max_frame=30000,
     )
@@ -208,7 +225,7 @@ def vad_silero(w: core.Wav16, st: Settings) -> List[Tuple[float, float]]:
     ts = get_speech_timestamps(
         x, model, sampling_rate=core.SR, threshold=float(st.vad_threshold),
         min_speech_duration_ms=int(st.vad_min_speech * 1000), min_silence_duration_ms=int(st.vad_min_silence * 1000),
-        speech_pad_ms=30, max_speech_duration_s=float(st.max_clip), return_seconds=True,
+        speech_pad_ms=30, max_speech_duration_s=float(st.max_clip or DEFAULT_MAX_CLIP), return_seconds=True,
     )
     return [(float(t["start"]), float(t["end"])) for t in ts]
 
@@ -253,7 +270,7 @@ class Session:
             return int(st.batch_size)
         model_gb = {"qwen": 5.0, "faster-whisper": 4.0, "nemo": 3.0, "hf-pipeline": 4.0, "hf-speechlm": 10.0,
                     "cohere": 5.0, "granite": 5.0, "vibevoice": 18.0}.get(p.engine, 5.0)
-        per = 0.45 * max(1.0, st.max_clip / 30.0)
+        per = 0.45 * max(1.0, (st.max_clip or DEFAULT_MAX_CLIP) / 30.0)
         bs = runtime.auto_batch_size(self.gpu, model_gb, per, cap=64 if p.engine == "qwen" else 32)
         if p.engine == "faster-whisper":
             bs = min(bs, 8)
@@ -364,7 +381,9 @@ class Session:
                 mem = st.vllm_gpu_mem or (min(0.6, max(0.3, (g.mem_gb - 14) / max(g.mem_gb, 1))) if g.ok else 0.5)
                 t_load = time.time()
                 server = self.h.vllm_server("vllm", p.model, gpu_mem=mem, extra_args=p.vllm_args, extra_env=self.extra_env())
-                info["load_sec"] = round(time.time() - t_load, 1)
+                waited = time.time() - t_load
+                info["load_sec"] = server.start_sec if server.start_sec is not None else round(waited, 1)
+                info["reused"] = waited < 1.0  # 起動済みのサーバーを使い回した
                 t0 = time.time()  # 速度比較はサーバー起動時間を除いて測る
                 fn = server.transcribe_fn(lang_code(lang), concurrency=st.vllm_concurrency)
                 res = core.run_asr(clips, w.get, fn, context=ctx, ctx_terms=terms, ctx_label=st.context_label,
@@ -445,7 +464,8 @@ class Session:
         return aligned
 
     def _second_opinion(self, results: List[core.ClipResult], w: core.Wav16, wav_path: str, st: Settings,
-                        lang: Optional[str], ctx: str, terms: List[str], db: np.ndarray, bs: int, quiet: bool) -> int:
+                        lang: Optional[str], ctx: str, terms: List[str], db: np.ndarray, bs: int, quiet: bool,
+                        segs: Sequence[Tuple[float, float]] = ()) -> int:
         """最後まで怪しいクリップだけ別のモデルで読み直し、怪しさが減るなら差し替える。元の結果は attempts に残す"""
         p2 = find_preset(st.second_opinion)
         main = self.preset_of(st)
@@ -481,29 +501,58 @@ class Session:
             if p2.engine in ("qwen", "hf-pipeline", "hf-speechlm", "cohere", "granite", "vibevoice"):
                 opts.update(dtype=st.dtype)
             self.h.ensure_loaded(p2.env, "asr2", p2.engine, opts, self.extra_env(), exclusive_group="asr2")
+        # このモデルのおすすめより長いクリップは、発話の切れ目で区切り直して読ませ、あとで本文をつなぐ
+        # (長いクリップで発話を読み飛ばすモデルだと、飛ばした結果のほうが「怪しくない」と判定されてしまうため)
+        lim = float(p2.max_clip) if p2.max_clip else 0.0
+        gap = float(p2.max_gap) if p2.max_gap is not None else DEFAULT_MAX_GAP
+        pieces_of: Dict[int, List[core.Clip]] = {}
+        next_id = max((r.clip.id for r in results), default=0) + 1
+        for c in [r.clip for r in bad]:
+            if lim and c.dur > lim + 0.5:
+                inner = [(max(s, c.start), min(e, c.end)) for s, e in segs if e > c.start and s < c.end] or [(c.start, c.end)]
+                cut = core.build_clips(inner, c.end, max_clip=lim, max_gap=gap, pad=min(st.vad_pad, 0.2), overlap=0.0, db=db)
+                for k, x in enumerate(cut):
+                    x.id, x.parent, x.start = next_id + k, c.id, max(x.start, c.start)
+                next_id += len(cut)
+                pieces_of[c.id] = cut or [c]
+            else:
+                pieces_of[c.id] = [c]
         for use_ctx, clips2 in groups.items():
             if not clips2:
                 continue
+            todo = [x for c in clips2 for x in pieces_of[c.id]]
             if server is not None:
-                res2 += core.run_asr(clips2, w.get, server.transcribe_fn(lang_code(lang), st.vllm_concurrency),
+                res2 += core.run_asr(todo, w.get, server.transcribe_fn(lang_code(lang), st.vllm_concurrency),
                                      context=use_ctx, policy=policy, batch_size=st.vllm_concurrency)
             else:
-                r = self.h.worker(p2.env).call("transcribe", key="asr2", wav=wav_path, clips=[c.to_dict() for c in clips2],
+                r = self.h.worker(p2.env).call("transcribe", key="asr2", wav=wav_path, clips=[c.to_dict() for c in todo],
                                                language=lang, context=use_ctx, policy=asdict(policy), batch_size=bs)
                 res2 += [core.ClipResult.from_dict(d) for d in r["results"]]
         by_id = {x.clip.id: x for x in res2}
         adopted = 0
+        inflating = {"repetition", "too_dense", "context_echo", "context_label"}  # 元の本文が水増しされている疑い
         for r in bad:
-            a = by_id.get(r.clip.id)
-            if a is None:
+            parts = [by_id.get(x.id) for x in pieces_of.get(r.clip.id, [])]
+            if not parts or any(a is None for a in parts):
                 continue
-            f2 = core.quality_flags(a.text, r.clip.dur, r.clip.speech, ctx_terms=terms, ctx_label=st.context_label,
+            if len(parts) == 1:
+                text2, words2 = parts[0].text, parts[0].words
+            else:  # 区切り直したもの: 本文をつなぐ(時刻はアライナーで付け直す)
+                text2, words2 = core.join_texts([a.text for a in parts]), None
+            f2 = core.quality_flags(text2, r.clip.dur, r.clip.speech, ctx_terms=terms, ctx_label=st.context_label,
                                     punctuates=p2.punctuates, lang=lang or "")
-            r.attempts.append({"model": p2.key, "text": a.text, "flags": f2})
-            if len(f2) < len(r.flags):
+            att: Dict[str, Any] = {"model": p2.key, "text": text2, "flags": f2}
+            if len(parts) > 1:
+                att["pieces"] = len(parts)
+            r.attempts.append(att)
+            # 元より大きく短い結果は、元が水増しを疑われているとき以外は採らない(読み飛ばしの疑い)
+            too_short = core.core_len(text2) < 0.6 * core.core_len(r.text) and not (set(r.flags) & inflating)
+            if len(f2) < len(r.flags) and not too_short:
                 r.attempts.append({"adopted": p2.key})
-                r.text, r.flags, r.words = a.text, f2, a.words
+                r.text, r.flags, r.words = text2, f2, words2
                 adopted += 1
+            elif too_short and len(f2) < len(r.flags):
+                att["rejected"] = "元より大きく短い(読み飛ばしの疑い)"
         if not quiet:
             log(f"      → {adopted} クリップを {p2.label} の結果に差し替えました(元の結果は JSON と要確認リストに残っています)")
         return adopted
@@ -551,6 +600,7 @@ class Session:
         T: Dict[str, float] = {}
         t_all = time.time()
         p = self.preset_of(st)
+        st = clip_settings(st, p)  # クリップ長・無音の「自動」をモデルのおすすめ値に
         lang = None if (st.language or "").lower() in ("auto", "", "自動") else st.language
         base = out_base or output_base(src, st.output_dir, many)
         os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
@@ -575,20 +625,15 @@ class Session:
         t = time.time()
         segs = self.vad(w, wav_key, st, db)
         max_clip = min(float(st.max_clip), 170.0) if st.aligner else float(st.max_clip)
-        # 1クリップに何人ぶんも入っていると発話を飛ばすモデル(kotoba-whisper / Cohere)は短く・無音で区切る
-        max_gap = float(st.max_gap)
-        if p.max_clip:
-            max_clip = min(max_clip, float(p.max_clip))
-        if p.max_gap:
-            max_gap = min(max_gap, float(p.max_gap))
-        clips = core.build_clips(segs, w.duration, max_clip=max_clip, max_gap=max_gap, pad=st.vad_pad,
+        clips = core.build_clips(segs, w.duration, max_clip=max_clip, max_gap=st.max_gap, pad=st.vad_pad,
                                  overlap=st.overlap, db=db)
         T["vad"] = time.time() - t
         speech = sum(e - s for s, e in segs)
         if not quiet:
             n_hard = sum(1 for c in clips if c.cut)
             log(f"[2/6] 区間検出({st.vad}) 発話 {core.fmt_dur(speech)} → {len(clips)} クリップ"
-                f"(最長 {max((c.dur for c in clips), default=0):.1f}秒, ハード切り {n_hard} か所)")
+                f"(上限 {max_clip:g}秒・無音 {st.max_gap:g}秒でつなぐ / 最長 {max((c.dur for c in clips), default=0):.1f}秒,"
+                f" ハード切り {n_hard} か所)")
 
         # 3) 話者分離(裏で並行して走らせる)
         diar_key = _sha([wav_key])
@@ -611,15 +656,19 @@ class Session:
         n_retry = sum(1 for r in results if len(r.attempts) > 1)
         n_flag = sum(1 for r in results if r.flags)
         if not quiet:
-            t_inf = asr_info.get("asr_sec") or T["asr"]  # モデルの読み込み・vLLM サーバーの起動は除く
-            log(f"      → {len(results)} クリップ / 再推論 {n_retry} / 要確認 {n_flag} (推論 {core.fmt_dur(t_inf)},"
-                f" x{w.duration / max(t_inf, 1e-6):.0f} 倍速"
-                + (f" / 読み込み {core.fmt_dur(asr_info['load_sec'])}" if asr_info.get("load_sec") else "") + ")")
+            if asr_info.get("cached"):
+                speed = "キャッシュから復元"
+            else:  # 倍速はモデルの読み込み・vLLM の起動を除いた推論だけの時間で(⑥の表と同じ)
+                infer = float(asr_info.get("asr_sec") or T["asr"])
+                load = 0.0 if asr_info.get("reused") else float(asr_info.get("load_sec") or 0.0)
+                speed = (f"推論 {core.fmt_dur(infer)}, x{w.duration / max(infer, 1e-6):.0f} 倍速"
+                         + (f" / 読み込み {core.fmt_dur(load)}" if load >= 0.5 else ""))
+            log(f"      → {len(results)} クリップ / 再推論 {n_retry} / 要確認 {n_flag} ({speed})")
 
         # 4.5) セカンドオピニオン(怪しいクリップだけ別モデルで)
         if st.second_opinion and n_flag:
             t = time.time()
-            n_adopt = self._second_opinion(results, w, wav_path, st, lang, ctx, terms, db, bs, quiet)
+            n_adopt = self._second_opinion(results, w, wav_path, st, lang, ctx, terms, db, bs, quiet, segs)
             n_flag = sum(1 for r in results if r.flags)
             T["second_opinion"] = time.time() - t
             asr_info["second_opinion_adopted"] = n_adopt
@@ -676,6 +725,7 @@ class Session:
             "diarization": st.diar_model if turns else None,
             "context": ctx if p.context else "",
             "vad": st.vad,
+            "clips": {"n": len(clips), "max_clip": max_clip, "max_gap": st.max_gap},
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "timing_sec": {k: round(v, 2) for k, v in T.items()},
             "asr": asr_info,
@@ -771,12 +821,15 @@ class Session:
                 "asr_sec": o["meta"]["asr"].get("asr_sec") or o["timing"].get("asr"), "wall_sec": wall,
                 "load_sec": (o["meta"]["asr"] or {}).get("load_sec"), "gpu_peak_gb": (o["meta"]["asr"] or {}).get("gpu_peak_gb"),
                 "flags": o["flags"], "duration": o["duration"], "srt": o["paths"].get("srt"),
+                "clips": o["meta"].get("clips"),
             }
             row["x_realtime"] = o["duration"] / max(row["asr_sec"] or wall, 1e-6)
             if ref:
                 row["cer"] = core.cer(ref, text)
                 row["terms"] = core.term_recall(ref, text, st.context_terms) if st.context_terms else None
                 row["numbers"] = core.number_recall(ref, text)
+                row["negations"] = core.negation_check(ref, text)
+                row["drops"] = core.drop_runs(ref, text)
             elif st.context_terms:
                 row["terms_found"] = sum(text.count(t) for t in st.context_terms)
             rows.append(row)
@@ -809,26 +862,51 @@ def _ratio(x: Optional[Tuple[int, int]]) -> str:
     return f"{x[0]}/{x[1]}"
 
 
+def _neg(x: Optional[Sequence[int]]) -> str:
+    if not x:
+        return "-"
+    hit, tot, extra = x
+    return (f"{hit}/{tot}" if tot else "-") + (f" (+{extra})" if extra else "")
+
+
+def _drops(x: Optional[Sequence[int]]) -> str:
+    if not x:
+        return "-"
+    n, chars = x
+    return "なし" if not n else f"<b>{n} か所</b>（{chars} 字）"
+
+
 def compare_table_html(rows: List[Dict[str, Any]], has_ref: bool) -> str:
-    th = ("<tr><th>モデル</th><th>処理時間</th><th>倍速</th><th>VRAM峰</th>"
-          + ("<th>CER</th><th>用語</th><th>数字</th>" if has_ref else "<th>1行目との差</th><th>用語の出現</th>")
+    th = ("<tr><th>モデル</th><th>推論</th><th>倍速</th><th>読み込み</th><th>VRAM峰</th>"
+          + ("<th>CER</th><th>用語</th><th>数字</th><th>否定</th><th>抜け</th>" if has_ref
+             else "<th>1行目との差</th><th>用語の出現</th>")
           + "<th>要確認</th><th>冒頭</th></tr>")
     trs = []
     for r in rows:
         if "error" in r:
-            trs.append(f"<tr><td>{html.escape(r['label'])}</td><td colspan=8 style='color:#c00'>{html.escape(r['error'][:200])}</td></tr>")
+            trs.append(f"<tr><td>{html.escape(r['label'])}</td><td colspan=11 style='color:#c00'>{html.escape(r['error'][:200])}</td></tr>")
             continue
         metric = r.get("cer") if has_ref else r.get("diff_vs_first")
         mtxt = "-" if metric is None else f"{metric * 100:.1f}%"
-        extra = (f"<td>{_ratio(r.get('terms'))}</td><td>{_ratio(r.get('numbers'))}</td>" if has_ref
+        extra = (f"<td>{_ratio(r.get('terms'))}</td><td>{_ratio(r.get('numbers'))}</td>"
+                 f"<td>{_neg(r.get('negations'))}</td><td>{_drops(r.get('drops'))}</td>" if has_ref
                  else f"<td>{r.get('terms_found', '-')}</td>")
+        cl = r.get("clips") or {}
+        ctxt = (f"<br><small style='color:#666'>{cl.get('n')} クリップ（上限 {cl.get('max_clip'):g}秒・無音 {cl.get('max_gap'):g}秒でつなぐ）</small>"
+                if cl.get("max_clip") else "")
+        load = r.get("load_sec")
         trs.append(
-            f"<tr><td>{html.escape(r['label'])}</td><td>{(r.get('asr_sec') or 0):.1f}秒</td><td>x{r['x_realtime']:.0f}</td>"
+            f"<tr><td>{html.escape(r['label'])}{ctxt}</td><td>{(r.get('asr_sec') or 0):.1f}秒</td><td>x{r['x_realtime']:.0f}</td>"
+            f"<td>{'-' if load is None else f'{load:.0f}秒'}</td>"
             f"<td>{r.get('gpu_peak_gb') or '-'}</td><td><b>{mtxt}</b></td>{extra}<td>{r.get('flags', 0)}</td>"
             f"<td style='max-width:520px'>{html.escape(r['text'][:160])}…</td></tr>")
     return ("<table style='border-collapse:collapse;font-size:13px' border=1 cellpadding=4>" + th + "".join(trs) + "</table>"
+            + "<div style='font-size:12px;color:#666'>推論・倍速はモデルの読み込み(vLLM はサーバーの起動)を除いた時間。"
+              "読み込みはそのモデルを最後に読み込んだときの時間です。</div>"
             + ("<div style='font-size:12px;color:#666'>CER は句読点・空白を除き NFKC 正規化した文字誤り率(低いほど良い)。"
-               "用語 = 正解に出てくる context の語を正しく書けた数、数字 = 正解の数字を同じ形で書けた数(金額・日付の取り違えの目安)。</div>" if has_ref else
+               "用語 = 正解に出てくる context の語を正しく書けた数、数字 = 正解の数字を同じ形で書けた数(金額・日付の取り違えの目安)、"
+               "否定 = 正解の「ない・ません」などが同じ所に残った数(+ は正解に無い否定。意味の反転の目安)、"
+               "抜け = 正解の 8 字以上がまとめて抜けた箇所(発話の読み飛ばしの目安)。</div>" if has_ref else
                "<div style='font-size:12px;color:#666'>正解テキストがないので、1行目のモデルとの文字の食い違い率を参考表示しています(どちらが正しいかは分かりません)。</div>"))
 
 
