@@ -44,6 +44,13 @@
 タイムスタンプはどのモデルでも **Qwen3-ForcedAligner-0.6B** で付け直すので、字幕の品質はそろいます（モデル自身のタイムスタンプを使う設定もあり）。
 どれが良いかは音声しだいなので、**⑥ で自分の会議音声を並べて比べる**のがおすすめです（正解テキストがあれば CER も出ます）。
 
+### Colab 実機で確かめたこと（A100・2026年9月。くわしくは [test_reports/colab_e2e.md](test_reports/colab_e2e.md)）
+
+- 全モデルが動きました。Common Voice 8 をつないだテスト音声では Qwen3-ASR 1.7B（CER 8.8%）と Whisper large-v3-turbo（8.0%）がいちばんよく、vLLM 版は同じ精度で推論が 5〜6 倍速いです（サーバー起動に 1〜2 分）
+- Colab のカーネルが Python 3.13 になっているので、いまは flash-attn の whl が合わず sdpa で動きます
+- Cohere Transcribe は HF で規約に同意するまで 403 になります
+- kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます。長いクリップだと発話を飛ばしやすいです（Cohere も少し）
+
 ## v2 からの改善点
 
 **区切り方**

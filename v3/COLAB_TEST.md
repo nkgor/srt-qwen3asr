@@ -28,8 +28,9 @@ printf '%s' "$COLAB_ADC_JSON" > ~/.config/gcloud/application_default_credentials
 export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
 
 # 2) Colab CLI(Python 3.12 以上が必要。uv が面倒を見てくれる)
-uv tool install google-colab-cli
-colab --auth adc new -s asr --gpu H100          # A100 でもよい
+# google-colab-cli 0.7.2 は jupyter-kernel-client==0.8 固定だが、0.8 には JupyterSubprotocol が無く exec が落ちる → 0.9 に上書き
+uv tool install google-colab-cli --with jupyter-kernel-client==0.9.0 --overrides <(echo "jupyter-kernel-client==0.9.0")
+colab --auth adc new -s asr --gpu H100          # 空きが無いと Service Unavailable。そのときは A100
 colab --auth adc status -s asr
 
 # 3) ファイルを送る
@@ -42,7 +43,7 @@ printf 'import os\nos.environ["HF_TOKEN"] = %s\nprint("HF_TOKEN set")\n' "$(pyth
 # 5) 通しテスト(テスト音声づくり → ⓪〜⑧ をフォームに値を入れて実行)
 #    E2E_ENGINES で入れる環境、E2E_COMPARE で⑥の比較対象、E2E_MINUTES で音声の長さ(分)を指定できる
 printf 'import os\nos.environ.update(E2E_MINUTES="6", E2E_CMP_SEC="300")\n' | colab --auth adc exec -s asr
-colab --auth adc exec -s asr -f v3/tools/colab_e2e.py
+colab --auth adc exec -s asr --timeout 5400 -f v3/tools/colab_e2e.py   # --timeout の既定は 30 秒(切れても VM 側は動き続ける)
 
 # 6) 結果を回収
 colab --auth adc download -s asr /content/e2e_out.tgz ./e2e_out.tgz
@@ -53,6 +54,22 @@ colab --auth adc stop -s asr
 ```
 
 うまくいかないときは `colab --auth adc log -s asr -o log.md` で実行履歴を取り出せます。
+
+カーネルが通しテストで埋まっている間も、**SSH** なら並行してログや venv を調べられます（`ssh` / `ssh-keygen` が要る。無ければ `apt-get install openssh-client`）:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q
+cat >> ~/.ssh/config <<'CFG'
+Host colab-asr
+  User root
+  ProxyCommand env GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json colab --auth adc ssh --proxy-mode -s asr
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+CFG
+ssh colab-asr 'tail -50 /content/asr_v3/logs/vllm_*.log'
+```
+
+同時に張れる SSH は 1 本だけ（2 本目は HTTP 429）。前の接続が切れるまで数秒待ってから次を。
 `colab exec` はセルと同じくカーネルの中で動くので、途中の変数(`SESS`, `OUTS`, `CMP` など)も続けて確かめられます。
 
 ## 確かめること

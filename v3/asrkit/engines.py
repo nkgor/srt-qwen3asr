@@ -108,6 +108,21 @@ def is_oom(e: BaseException) -> bool:
     return "out of memory" in msg or "cuda error: out of memory" in msg or type(e).__name__ == "OutOfMemoryError"
 
 
+def reset_gpu_peak() -> None:
+    """VRAM 峰の計測をリセット(同じワーカーでモデルを入れ替えても、前のモデルの峰を引きずらないように)
+
+    torch をまだ読んでいないワーカーでは何もしない(faster-whisper などの CUDA ライブラリの読み込み順を変えないため)
+    """
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        pass
+
+
 def gpu_peak_gb() -> float:
     try:
         torch = torch_mod()

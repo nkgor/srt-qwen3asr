@@ -93,6 +93,7 @@ def main() -> None:
                     except Exception:
                         pass
                     engines.free_cuda()
+                engines.reset_gpu_peak()
                 t0 = time.time()
                 obj = engines.make_engine(msg["kind"], dict(msg.get("options") or {}))
                 objs[key] = obj
@@ -121,6 +122,7 @@ def main() -> None:
                     send({"id": rid, "event": "progress", "stage": stage, "done": n, "total": total,
                           "results": [r.to_dict() for r in part]})
 
+                engines.reset_gpu_peak()  # 峰 = 読み込み済みの重み + この文字起こし中の最大
                 t0 = time.time()
                 res = core.run_asr(
                     clips, w.get, lambda items: eng.transcribe(items, language),
