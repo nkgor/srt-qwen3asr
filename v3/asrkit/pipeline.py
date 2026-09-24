@@ -576,7 +576,7 @@ class Session:
         if not os.path.exists(runtime.env_python(self.diar_env)):
             log(f"⚠️ 話者分離の環境({self.diar_env})がありません。セットアップのセルで入れてください")
             return None
-        # ワーカーの起動とモデル読み込みはメインスレッドで(子プロセスの寿命がスレッドに縛られないように)
+        # ワーカーの起動とモデル読み込みはここで(裏のスレッドでは文字起こしと並べて話者分離だけする)
         self.h.ensure_loaded(self.diar_env, "diar", self.diar_kind, {"model": st.diar_model}, self.extra_env())
         wk = self.h.worker(self.diar_env)
 

@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -322,6 +322,46 @@ class WorkerError(RuntimeError):
     pass
 
 
+class _Spawner:
+    """長く動かす子プロセス(ワーカー・vLLM)は、いつもこの専用スレッドから起動する。
+
+    子プロセスには「親が死んだら道連れ」(PR_SET_PDEATHSIG)を付けているが、これは親の“プロセス”ではなく
+    起動した“スレッド”が終わったときに届く。⑨ Web UI は 1 件ごとに別のスレッドで処理するので、そのスレッドから
+    起動すると 1 件終わるたびにワーカーと vLLM が止まり、次の 1 件で毎回「落ちていたので起動しなおします」になっていた"""
+
+    def __init__(self) -> None:
+        self._q: "queue.Queue[Tuple[Callable[[], Any], Future]]" = queue.Queue()
+        self._t: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def _loop(self) -> None:
+        while True:
+            fn, fut = self._q.get()
+            try:
+                fut.set_result(fn())
+            except BaseException as e:  # 呼んだ側で投げなおす
+                fut.set_exception(e)
+
+    def run(self, fn: Callable[[], Any]) -> Any:
+        with self._lock:
+            if self._t is None or not self._t.is_alive():
+                self._t = threading.Thread(target=self._loop, name="asrkit-spawner", daemon=True)
+                self._t.start()
+        if threading.current_thread() is self._t:
+            return fn()
+        fut: Future = Future()
+        self._q.put((fn, fut))
+        return fut.result()
+
+
+_SPAWNER = _Spawner()
+
+
+def spawn(*args: Any, **kw: Any) -> subprocess.Popen:
+    """長く動かす子プロセスを起動する(どのスレッドから呼んでも、起動は専用のスレッドで)"""
+    return _SPAWNER.run(lambda: subprocess.Popen(*args, **kw))
+
+
 class Worker:
     def __init__(self, env_name: str, extra_env: Optional[Dict[str, str]] = None, echo: bool = False):
         _mkdirs()
@@ -338,7 +378,7 @@ class Worker:
         self.log_path = os.path.join(LOG_DIR, f"worker_{env_name}.log")
         self._log = open(self.log_path, "a", encoding="utf-8")
         self._log.write(f"\n===== start {time.ctime()} =====\n")
-        self.proc = subprocess.Popen(
+        self.proc = spawn(
             [py, "-u", "-m", "asrkit.worker"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
@@ -389,6 +429,8 @@ class Worker:
                     "ランタイムをハイメモリにするか、⑧で VRAM を解放してから、読み込むモデルを減らしてください)")
         if rc in (-11, 139):
             return "(セグメンテーション違反で落ちました。ライブラリの組み合わせの問題の可能性があります)"
+        if rc in (-15, 143):
+            return "(外から止められました(SIGTERM))"
         return f"(終了コード {rc})"
 
     def call(self, cmd: str, *, on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -527,8 +569,8 @@ class VLLMServer:
                 "try: ctypes.CDLL('libc.so.6').prctl(1, signal.SIGTERM)\n"
                 "except Exception: pass\n"
                 "os.execvp(sys.argv[1], sys.argv[1:])")
-        self.proc = subprocess.Popen([sys.executable, "-c", wrap, *args], stdout=logf, stderr=subprocess.STDOUT, env=env)
-        t0, last = time.time(), 0.0
+        self.proc = spawn([sys.executable, "-c", wrap, *args], stdout=logf, stderr=subprocess.STDOUT, env=env)
+        t0 = last = time.time()  # 途中経過は 30 秒ごと(0 秒の時点ではまだ何も出ていない)
         while True:
             if not self.alive():
                 raise WorkerError(f"vLLM サーバーが起動に失敗しました。\n{_tail(self.log_path, 60)}")
@@ -608,7 +650,7 @@ class Handles:
         if w is not None and w.alive():
             return w
         if w is not None:
-            log(f"⚠️ ワーカー({env_name})が落ちていたので起動しなおします。末尾ログ:\n{w.tail(15)}")
+            log(f"⚠️ ワーカー({env_name})が止まっていたので起動しなおします {w.death_hint()}。末尾ログ:\n{w.tail(15)}")
         w = Worker(env_name, extra_env)
         self.workers[env_name] = w
         return w

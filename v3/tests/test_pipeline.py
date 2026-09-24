@@ -141,6 +141,96 @@ def test_worker_error_is_reported(home):
         w.close()
 
 
+def test_worker_survives_short_lived_thread(home):
+    """⑨ Web UI は 1 件ごとに別のスレッドで処理する。そのスレッドが終わってもワーカーは止まらないこと
+    (PR_SET_PDEATHSIG は「起動したスレッド」が終わると届くので、起動は長生きのスレッドでする)"""
+    import threading
+    import time
+
+    from asrkit import runtime
+
+    h = runtime.Handles()
+    box = {}
+
+    def job():  # ⑨ と同じ: このスレッドの中でワーカーを起動して使い、終わったらスレッドも終わる
+        w = box["w"] = h.worker("fake")
+        assert w.call("ping")["ok"]  # ここまで来ればワーカーの起動(prctl も)は済んでいる
+
+    try:
+        t = threading.Thread(target=job)
+        t.start()
+        t.join()
+        time.sleep(1.5)  # スレッドが終わったあと、シグナルが届くなら届いている時間
+        w = box["w"]
+        assert w.alive(), w.tail(20)
+        assert w.call("ping")["ok"]
+        assert h.worker("fake") is w  # 次の 1 件でも同じワーカーを使う(起動しなおさない)
+    finally:
+        h.close_all()
+
+
+def test_vllm_server_survives_short_lived_thread(home):
+    """vLLM サーバーも同じ: ⑨ の 1 件ぶんのスレッドが終わっても止まらず、次の 1 件で使い回せること
+    (本物の vLLM の代わりに /health に答えるだけの小さなサーバーを使う)"""
+    import socket
+    import threading
+    import time
+
+    from asrkit import runtime
+
+    exe = os.path.join(runtime.env_dir("vllmfake"), "bin", "vllm")
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    with open(exe, "w", encoding="utf-8") as f:
+        f.write(f"#!{sys.executable}\n"
+                "import http.server, sys\n"
+                "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+                "class H(http.server.BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+                "    def log_message(self, *a):\n"
+                "        pass\n"
+                "http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()\n")
+    os.chmod(exe, 0o755)
+    with socket.socket() as s_:
+        s_.bind(("127.0.0.1", 0))
+        port = s_.getsockname()[1]
+    h = runtime.Handles()
+    box = {}
+    try:
+        t = threading.Thread(target=lambda: box.setdefault("s", h.vllm_server("vllmfake", "m", port=port)))
+        t.start()
+        t.join()
+        time.sleep(1.5)
+        assert box["s"].alive(), runtime._tail(box["s"].log_path, 20)
+        assert h.vllm_server("vllmfake", "m", port=port) is box["s"]  # 起動しなおさずに使い回す
+    finally:
+        h.close_all()
+
+
+def test_workers_still_die_with_their_process(home, tmp_path):
+    """道連れ(PR_SET_PDEATHSIG)はそのまま: カーネル(親プロセス)が終わったら、ワーカーも止まること"""
+    import time
+
+    code = ("import sys, os; sys.path.insert(0, %r)\n"
+            "from asrkit import runtime\n"
+            "w = runtime.Handles().worker('fake')\n"
+            "assert w.call('ping')['ok']\n"
+            "print(w.proc.pid, flush=True)\n"
+            "os._exit(0)\n") % os.path.join(HERE, "..")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ))
+    pid = int(r.stdout.strip().splitlines()[-1])
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+    else:
+        os.kill(pid, 9)
+        raise AssertionError("親が終わってもワーカーが残っています")
+
+
 def test_second_opinion_and_review(home, audio, tmp_path):
     from asrkit import pipeline, presets
 

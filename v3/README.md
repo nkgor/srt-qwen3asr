@@ -58,6 +58,7 @@
 
 - 全モデルが動きました。Common Voice 8 をつないだテスト音声では Qwen3-ASR 1.7B（CER 8.8%）と Whisper large-v3-turbo（8.0%）がいちばんよく、vLLM 版は同じ精度で推論が 5〜6 倍速いです（サーバー起動に 1〜2 分）
 - Colab のカーネルが Python 3.13 になっていたので、flash-attn は cp313 版の whl を入れます（コミュニティのビルド。Colab ではまだ未確認で、入らなければ sdpa で動きます）
+- **G4（RTX PRO 6000 Blackwell・96GB）でも動きました**（利用者の実行ログより）。vLLM・flash-attn・pyannote とも問題なく、50 分の会議音声を Qwen3-ASR 1.7B × vLLM で推論 2.7 秒（x1133）、話者分離・タイムスタンプ込みで合計 1 分 9 秒でした
 - Cohere Transcribe は HF で規約に同意するまで 403 になります
 - kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます
 - kotoba-whisper・Cohere・Parakeet・Granite は、1つのクリップに無音をはさんで何人ぶんも入ると発話を飛ばすので、プリセットで「15 秒・無音 1 秒」で区切ります（同じ音声を CPU でくらべた CER: kotoba 30.1%→9.0%、**Cohere 19.2%→4.3%**、Parakeet 16.0%→6.2%、Granite 19.4%→7.3%。くわしくは [test_reports/clip_sweep_cpu.md](test_reports/clip_sweep_cpu.md)）。Qwen と Whisper はいままでの 30 秒・無音 6 秒のままです
