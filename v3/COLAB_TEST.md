@@ -97,3 +97,12 @@ ssh colab-asr 'tail -50 /content/asr_v3/logs/vllm_*.log'
 - [ ] ⑥ の比較表: Qwen 1.7B / JA 版 / 0.6B / Cohere / Granite / VibeVoice / Whisper turbo / kotoba / Parakeet / vLLM（Qwen・Cohere）
 - [ ] vLLM サーバーが起動して、Qwen3-ASR を高速に処理できるか（`vllm` のバージョンと CUDA の相性）
 - [ ] ⑧ で VRAM がちゃんと解放されるか
+
+### 次に GPU で確かめたいこと（A100 のテストのあとに入った変更）
+
+- [ ] flash-attn の cp313 版の whl が入り、Qwen が `attn=flash_attention_2` で動くか
+- [ ] ⑥ の表: 読み込み時間の列・区切り方・「否定」「抜け」の列が出るか。kotoba / Cohere / Parakeet が「自動」の区切り方で読み飛ばさなくなったか（CPU では確認ずみ）
+- [ ] `clip_sweep.py` で GPU の CER（とくに VibeVoice の区切り方。CPU ではメモリが足りず未確認）
+- [ ] Granite Speech のバッチ処理で速くなったか（A100 では x6 だった）
+- [ ] ⑨ Web UI がセルの下に出て、アップロード → 文字起こし → ダウンロードができるか
+- [ ] H100 での速さ（とくに vLLM）

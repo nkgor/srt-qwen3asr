@@ -286,9 +286,9 @@ audio_filter = "なし"  #@param ["なし", "音量をそろえる (loudnorm)", 
 vad = "fireredvad"  #@param ["fireredvad", "silero", "energy", "none"]
 #@markdown **vad_threshold**: 発話と判定するしきい値（上げると厳しめ＝区間が減る）
 vad_threshold = 0.4  #@param {type:"slider", min:0.05, max:0.95, step:0.05}
-#@markdown **max_clip_sec**: 1回で ASR に渡す最大秒数。「自動」はモデルのおすすめ（ふつう 30 秒。kotoba-whisper などは短め）。長いほど文脈が効くが重い
+#@markdown **max_clip_sec**: 1回で ASR に渡す最大秒数。「自動」はモデルのおすすめ（ふつう 30 秒。kotoba-whisper・Cohere・Parakeet は 15 秒）。長いほど文脈が効くが重い
 max_clip_sec = "自動"  #@param ["自動", "10", "15", "20", "30", "45", "60"] {allow-input: true}
-#@markdown **max_gap_sec**: これより長い無音をはさむ発話は別クリップにする。「自動」はモデルのおすすめ（ふつう 6 秒）
+#@markdown **max_gap_sec**: これより長い無音をはさむ発話は別クリップにする。「自動」はモデルのおすすめ（ふつう 6 秒。kotoba-whisper・Cohere・Parakeet は 1 秒）。発話の読み飛ばしが気になるときは 1〜2 に
 max_gap_sec = "自動"  #@param ["自動", "1", "2", "3", "6", "10"] {allow-input: true}
 #@markdown **overlap_sec**: ハード切り（長い発話の強制分割）の前後の重なり。重複は自動で除去
 overlap_sec = 1.0  #@param {type:"number"}

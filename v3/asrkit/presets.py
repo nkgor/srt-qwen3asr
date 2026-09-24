@@ -115,11 +115,14 @@ PRESETS: List[Preset] = [
                 "1 秒の無音でも区切る(何人ぶんも入ると発話を飛ばすため。CV8 の CER 24%→8%)"
                 "(タイムスタンプはアライナーで付ける。faster-whisper の単語時刻はこのモデルだと segfault するため)"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
-           options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
-           note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。句読点は少なめ"),
+           options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, max_clip=15.0, max_gap=1.0,
+           license="CC-BY-4.0",
+           note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。長いクリップだと発話を飛ばすので "
+                "15 秒・1 秒の無音で区切る(CV8 の CER 16.0%→6.2%)"),
     Preset("granite-speech-4.1", "Granite Speech 4.1 2B（IBM・実験的）", "granite", "hf", "ibm-granite/granite-speech-4.1-2b",
-           options={"batch_size": 8}, ja="○", punctuates=False, license="Apache-2.0",
-           note="日本語対応の2B(2026年4月)。context の語をキーワードとして渡すが、関係ない所にも入れがちなので語は少なめに"),
+           options={"batch_size": 8}, ja="○", punctuates=False, max_clip=15.0, max_gap=1.0, license="Apache-2.0",
+           note="日本語対応の2B(2026年4月)。context の語をキーワードとして渡すが、関係ない所にも入れがちなので語は少なめに。"
+                "長いクリップだと発話を飛ばすので 15 秒・1 秒の無音で区切る(CV8 の CER 19.4%→7.3%)"),
     Preset("vibevoice-asr", "VibeVoice-ASR 8B（Microsoft・実験的）", "vibevoice", "hf", "microsoft/VibeVoice-ASR-HF",
            options={"batch_size": 4}, ja="○", gpu="A100/H100/L4(24GB〜)", license="MIT",
            note="50以上の言語・context 対応の8B。本来は60分一気読み＋話者付けのモデル"),

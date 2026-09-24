@@ -36,20 +36,20 @@
 
 ## モデル（② のプルダウン）
 
-| プリセット | エンジン | 目安 | メモ |
-|---|---|---|---|
-| Qwen3-ASR 1.7B（標準） | qwen-asr | T4〜 | v1/v2 と同じ。context（固有名詞）が効く |
-| Qwen3-ASR 0.6B | qwen-asr | T4〜 | 軽くて速い |
-| Qwen3-ASR 1.7B JA（neosophie） | qwen-asr | T4〜 | 日本語の固有名詞向けの追加学習版。固有名詞 F1 0.59→0.65、全体 CER 8.23%→8.92% の報告 |
-| Qwen3-ASR 1.7B × vLLM | vLLM | L4/A100/H100 | 中身は標準と同じで大幅に速い |
-| Cohere Transcribe 2B | transformers | T4〜 | 別系統の有力候補。日本語 CER は FLEURS 2.89%（Qwen 5.28%）など。HF で規約同意 |
-| Cohere Transcribe × vLLM | vLLM | L4/A100/H100 | |
-| Whisper large-v3 / large-v3-turbo | faster-whisper | T4〜 | 定番 |
-| kotoba-whisper v2.0 | faster-whisper | T4〜 | 日本語特化の Whisper |
-| Parakeet TDT-CTC 0.6B ja | NeMo | T4〜 | NVIDIA の日本語専用。とても速い（JSUT の CER 6.60% の報告）。句読点は少なめ |
-| Granite Speech 4.1 2B（実験的） | transformers | T4〜 | IBM・2026年4月。日本語対応。context の語をキーワードとして渡す（入れすぎ注意） |
-| VibeVoice-ASR 8B（実験的） | transformers | 24GB〜 | Microsoft・2026年。50以上の言語・context 対応（ここでは本文だけ使う） |
-| カスタム | 任意 | | Hugging Face のモデル ID とエンジンを指定 |
+| プリセット | エンジン | 目安 | 区切り（「自動」のとき） | メモ |
+|---|---|---|---|---|
+| Qwen3-ASR 1.7B（標準） | qwen-asr | T4〜 | 30 秒・無音 6 秒 | v1/v2 と同じ。context（固有名詞）が効く |
+| Qwen3-ASR 0.6B | qwen-asr | T4〜 | 30 秒・無音 6 秒 | 軽くて速い |
+| Qwen3-ASR 1.7B JA（neosophie） | qwen-asr | T4〜 | 30 秒・無音 6 秒 | 日本語の固有名詞向けの追加学習版。固有名詞 F1 0.59→0.65、全体 CER 8.23%→8.92% の報告 |
+| Qwen3-ASR 1.7B × vLLM | vLLM | L4/A100/H100 | 30 秒・無音 6 秒 | 中身は標準と同じで大幅に速い |
+| Cohere Transcribe 2B | transformers | T4〜 | **15 秒・無音 1 秒** | 別系統の有力候補。日本語 CER は FLEURS 2.89%（Qwen 5.28%）など。HF で規約同意 |
+| Cohere Transcribe × vLLM | vLLM | L4/A100/H100 | **15 秒・無音 1 秒** | |
+| Whisper large-v3 / large-v3-turbo | faster-whisper | T4〜 | 30 秒・無音 6 秒 | 定番 |
+| kotoba-whisper v2.0 | faster-whisper | T4〜 | **15 秒・無音 1 秒** | 日本語特化の Whisper（公式どおり 15 秒の窓で読む） |
+| Parakeet TDT-CTC 0.6B ja | NeMo | T4〜 | **15 秒・無音 1 秒** | NVIDIA の日本語専用。とても速い（JSUT の CER 6.60% の報告） |
+| Granite Speech 4.1 2B（実験的） | transformers | T4〜 | **15 秒・無音 1 秒** | IBM・2026年4月。日本語対応。context の語をキーワードとして渡す（入れすぎ注意） |
+| VibeVoice-ASR 8B（実験的） | transformers | 24GB〜 | 30 秒・無音 6 秒（未調整） | Microsoft・2026年。50以上の言語・context 対応（ここでは本文だけ使う） |
+| カスタム | 任意 | | 30 秒・無音 6 秒 | Hugging Face のモデル ID とエンジンを指定 |
 
 タイムスタンプはどのモデルでも **Qwen3-ForcedAligner-0.6B** で付け直すので、字幕の品質はそろいます（モデル自身のタイムスタンプを使う設定もあり）。
 どれが良いかは音声しだいなので、**⑥ で自分の会議音声を並べて比べる**のがおすすめです（正解テキストがあれば CER も出ます）。
@@ -60,7 +60,7 @@
 - Colab のカーネルが Python 3.13 になっていたので、flash-attn は cp313 版の whl を入れます（コミュニティのビルド。Colab ではまだ未確認で、入らなければ sdpa で動きます）
 - Cohere Transcribe は HF で規約に同意するまで 403 になります
 - kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます
-- kotoba-whisper と Cohere は、1つのクリップに何人ぶんも入ると発話を飛ばすので、プリセットで「15 秒・無音 1 秒」で短く区切ります（CER が kotoba 24%→8%、Cohere 19%→4%）
+- kotoba-whisper・Cohere・Parakeet・Granite は、1つのクリップに無音をはさんで何人ぶんも入ると発話を飛ばすので、プリセットで「15 秒・無音 1 秒」で区切ります（同じ音声を CPU でくらべた CER: kotoba 30.1%→9.0%、**Cohere 19.2%→4.3%**、Parakeet 16.0%→6.2%、Granite 19.4%→7.3%。くわしくは [test_reports/clip_sweep_cpu.md](test_reports/clip_sweep_cpu.md)）。Qwen と Whisper はいままでの 30 秒・無音 6 秒のままです
 
 ## v2 からの改善点
 
@@ -68,7 +68,7 @@
 - 長すぎる発話の「ハード切り」を復活（v2 で抜けていた）。切る位置は、いちばん静かな所を探して決める
 - すべての境界で前後に余白をつけてモデルに聞かせる。単語は「担当区間」に中点があるものだけ使うので、語頭・語尾の欠けや二重転写が出ない
 - 余白を含めても `max_clip_sec` を超えないことを保証。VAD が発話を見つけられないときは、全体を静かな所で区切るフォールバック
-- クリップの長さ（`max_clip_sec`）と、つなぐ無音の長さ（`max_gap_sec`）は **既定が「自動」**。モデルごとのおすすめ値を使う（kotoba-whisper と Cohere は 15 秒・無音 1 秒で短く区切る、など。値は `presets.py`）
+- クリップの長さ（`max_clip_sec`）と、つなぐ無音の長さ（`max_gap_sec`）は **既定が「自動」**。モデルごとのおすすめ値を使う（kotoba-whisper・Cohere・Parakeet・Granite は 15 秒・無音 1 秒で短く区切る、など。値は `presets.py`）
 
 **失敗対策**
 - 怪しい結果の自動検出: context の復唱、ループ、しゃべれる速さを超える文字数、発話があるのに空、句読点なしの長文、日本語なのにハングル等の混入
@@ -90,7 +90,7 @@
 - モデルごとに別の venv の「ワーカー」で動かすので、**依存の衝突なし・再起動いらず**（v2 の「要再起動」がなくなった）
 - GPU のメモリからバッチサイズを自動設定、CUDA OOM で自動縮小、長さ順のバッチで無駄を減らす
 - A100/H100 は vLLM で大幅に高速化
-- Granite Speech はプロンプトごとにまとめて**バッチ処理**（1件ずつだったのを直した。結果は同じで、CPU でも 3 件で 75 秒 → 5 秒）
+- Granite Speech はプロンプトごとにまとめて**バッチ処理**（A100 で x6 と遅かったのは 1 件ずつ処理していたため。まとめても結果は同じことを確かめた。GPU での速さは未確認）
 - flash-attn は Colab の torch 2.11 × Python 3.12 / 3.13 用の whl を自動で入れる（合わなければ sdpa）
 - 途中結果をキャッシュ（出力先の `.asr_v3_cache/`）→ 切断されても**続きから再開**
 - フォルダ一括・ワイルドカード・アップロード、動画もOK（ffmpeg）、ステレオの左右選択、音量/ノイズのフィルタ

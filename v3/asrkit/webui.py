@@ -15,7 +15,7 @@ import shutil
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional
 
 from . import core, runtime
 from .pipeline import Session, Settings, log

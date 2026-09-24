@@ -9,6 +9,7 @@ colab_e2e.py を一度通したあと(環境・テスト音声・⓪ のライ�
                   (max_clip / max_gap は数字か auto。オプションは chunk_length=15,beam_size=5 のように。0 は「なし」)
   SWEEP_ONLY      このプリセットだけ(カンマ区切り)
   SWEEP_SEC       先頭から何秒を使うか(既定 300)
+  SWEEP_DTYPE / SWEEP_BATCH  dtype(auto / bf16 など)とバッチ(0 = 自動)。CPU でメモリが足りないとき用
 結果: /content/sweep_out/sweep.json と sweep.md(表)
 
 GPU がなくても(遅いけれど)同じ比較ができる。CER は GPU とほぼ同じになる:
@@ -125,14 +126,15 @@ def main() -> int:
                     o[k] = v
             p = dataclasses.replace(base, key=f"{base.key}@{tag}", label=f"{base.label} [{tag}]", options=o)
             presets.PRESETS.append(p)
-        if cur_env and cur_env != (base.env, base.key):  # 前のモデルを外す(プロセスごと止めて CPU のメモリも返す)
-            sess.h.unload(cur_env[0], "asr")
-            if cur_env[0] != sess.aligner_env:  # アライナーの入ったワーカーだけは残す
-                sess.h.close_worker(cur_env[0])
+        if cur_env and cur_env != (base.env, base.key):  # 前のモデルを外す
+            # プロセスごと止めて CPU のメモリも返す(アライナーと同じ環境でも。外しただけではメモリが戻らない)
+            sess.h.close_worker(cur_env[0])
         cur_env = (base.env, base.key)
         st = pipeline.Settings(preset=p.key, language="Japanese", output_dir=OUT, formats=("txt", "json"),
                                context_terms=terms, cache=False, diarize=False, review=False,
-                               max_clip=pipeline.auto_num(mc), max_gap=pipeline.auto_num(mg))
+                               max_clip=pipeline.auto_num(mc), max_gap=pipeline.auto_num(mg),
+                               dtype=os.environ.get("SWEEP_DTYPE", "auto"),  # CPU でメモリが足りないときは bf16
+                               batch_size=int(os.environ.get("SWEEP_BATCH", "0")))
         safe = tag.replace("/", "-").replace(",", "_").replace("=", "")
         print(f"\n===== {base.key} [{tag}] =====", flush=True)
         try:
