@@ -15,7 +15,7 @@ import textwrap
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "Qwen3-ASR_v3.ipynb")
-LIB_FILES = ["__init__.py", "core.py", "runtime.py", "engines.py", "worker.py", "presets.py", "pipeline.py"]
+LIB_FILES = ["__init__.py", "core.py", "runtime.py", "engines.py", "worker.py", "presets.py", "pipeline.py", "webui.py"]
 
 sys.path.insert(0, HERE)
 from asrkit import presets  # noqa: E402
@@ -60,6 +60,8 @@ INTRO = f"""
 
 **使い方**: ⓪ → ① を実行 → ②〜④ のフォームを埋める → ⑤ 実行（メニューの「ランタイム → すべてのセルを実行」でもOK）
 
+**画面でお手軽に**: ⓪ → ① → いちばん下の **⑨ Web UI** を実行すると、音声をアップロードするだけで文字起こしできる画面が出ます
+
 | | v2 からの主な改善 |
 |---|---|
 | モデル | Qwen3-ASR 1.7B/0.6B・vLLM 版・Whisper large-v3/turbo・kotoba-whisper・Parakeet 日本語 などをプルダウンで切り替え。**⑥で並べて比較**も |
@@ -101,6 +103,11 @@ for _p, _src in _FILES.items():
         _f.write(_src)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
+if "webui" in globals():  # 動いている Web UI(⑨)を止める
+    try:
+        webui.stop()
+    except Exception:
+        pass
 if "SESS" in globals():  # 作り直す前に古いワーカーを止める
     try:
         SESS.free()
@@ -108,8 +115,8 @@ if "SESS" in globals():  # 作り直す前に古いワーカーを止める
         pass
     del SESS
 import asrkit
-from asrkit import core, runtime, engines, presets, pipeline
-for _m in (asrkit, core, runtime, engines, presets, pipeline):
+from asrkit import core, runtime, engines, presets, pipeline, webui
+for _m in (asrkit, core, runtime, engines, presets, pipeline, webui):
     importlib.reload(_m)
 print(f"✅ asrkit {asrkit.__version__} を読み込みました ({_LIB})")
 """
@@ -425,9 +432,32 @@ def compare_cell() -> str:
     return "\n".join(lines)
 
 
+WEBUI = """
+#@title ⑨ Web UI（Gradio・アップロードしてすぐ文字起こし）
+#@markdown ブラウザの画面から、音声/動画のアップロード（またはマイク録音）→ モデルを選んで文字起こし → 結果をダウンロード、ができます
+#@markdown - ① のあとならいつでも立ち上げられます（⑤ を実行済みなら、④ の細かい設定と ② の context を引き継ぎます）
+#@markdown - ふだんは**このセルの下**に画面が出ます（あなたのブラウザからだけ見られます）
+#@markdown - `share` を ON にすると、だれでも開ける公開 URL（gradio.live・72時間）ができます。会議の音声を扱うときは `password` も入れてください（ユーザー名は `asr`）
+share = False  #@param {type:"boolean"}
+password = ""  #@param {type:"string"}
+port = 7860  #@param {type:"integer"}
+import subprocess, sys
+try:
+    import gradio
+except ImportError:
+    print("gradio を入れています…")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gradio"], check=True)
+if "SESS" not in globals():
+    SESS = pipeline.Session()
+DEMO = webui.launch(SESS, ST if "ST" in globals() else pipeline.Settings(), share=share, port=port, password=password)
+"""
+
+
 CLEAN = """
 #@title ⑧ 後片付け（VRAM 解放）
 #@markdown モデルを読み込んだままのワーカーと vLLM サーバーを止めて GPU メモリを空けます（次の実行では自動で読み込み直し）
+if "webui" in globals():
+    webui.stop()  # ⑨ の画面も止める
 if "SESS" in globals():
     print("\\n".join(SESS.h.status()) or "(動いているものはありません)")
     SESS.free()
@@ -448,10 +478,12 @@ def build() -> dict:
         ## おまけ
         - **⑥ モデル比較**: 同じ区間をいろいろなモデルで文字起こしして比べる
         - **⑦ 議事録づくり**: 文字起こし結果から議事録を作る（プロンプトを作るだけ / Colab の Gemini（無料）/ Claude API）
+        - **⑨ Web UI**: ブラウザの画面でアップロード → 文字起こし（Gradio）
         """, "v3extra"),
         code(compare_cell(), "v3cmp"),
         code(minutes_cell(), "v3min"),
         code(CLEAN, "v3clean"),
+        code(WEBUI, "v3webui"),
     ]
     nb = {
         "cells": cells,

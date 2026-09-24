@@ -212,3 +212,79 @@ def test_minutes_prompt_only(tmp_path):
     body = open(p, encoding="utf-8").read()
     assert p.endswith("_minutes_prompt.md")
     assert "<transcript>" in body and "予算は来月決めます" in body and "TODO" in body and "予算" in body
+
+
+def test_preset_max_clip_limits_clips(home, audio, tmp_path):
+    """長いクリップで発話を飛ばすモデル(kotoba / Cohere)用: プリセットの max_clip で短く区切る"""
+    from asrkit import pipeline, presets
+
+    sess = _session()
+    presets.PRESETS.append(presets.Preset("dummy-clip8", "ダミー(8秒)", "dummy", "fake", "dummy-model", max_clip=8))
+    # max_clip / max_gap が「自動」(None)のときはプリセットのおすすめを使う
+    st = pipeline.Settings(output_dir=str(tmp_path), preset="dummy-clip8", vad="energy", batch_size=2,
+                           formats=("json",), cache=False)
+    try:
+        o = sess.transcribe_file(audio, st)
+        doc = json.load(open(o["paths"]["json"], encoding="utf-8"))
+        assert max(c["end"] - c["start"] for c in doc["clips"]) <= 8 + st.overlap + 0.01
+        assert presets.find_preset("kotoba-whisper-v2").max_clip
+        assert presets.find_preset("cohere-transcribe").max_clip
+        assert presets.find_preset("cohere-transcribe-vllm").max_clip
+        assert presets.find_preset("kotoba-whisper-v2").max_gap == presets.find_preset("cohere-transcribe").max_gap == 1.0
+    finally:
+        sess.free()
+
+
+def _webui(tmp_path):
+    import importlib
+
+    from asrkit import webui
+
+    importlib.reload(webui)
+    webui.OUT_ROOT = str(tmp_path / "webui")
+    return webui
+
+
+def test_webui_transcribe(home, audio, tmp_path):
+    from asrkit import pipeline
+
+    webui = _webui(tmp_path)
+    sess = _session()
+    try:
+        assert "ダミー" in [p.label for p in webui.available_presets()]
+        r = webui.transcribe(sess, pipeline.Settings(vad="energy", max_clip=20, batch_size=2), audio,
+                             model="ダミー", context="Claude", diarize=True)
+        assert r["text"].startswith("[00:00:0")
+        exts = {os.path.basename(f).split(".", 1)[-1] for f in r["files"]}
+        assert {"txt", "srt", "vtt", "json", "csv", "md"} <= exts
+        assert r["dir"].startswith(webui.OUT_ROOT)
+        assert "pyannote" in r["summary"]  # 話者分離の環境が無いときは断って話者なしで出す
+    finally:
+        sess.free()
+
+
+def test_webui_gradio_http(home, audio, tmp_path):
+    """gradio の画面を本当に立ち上げて、HTTP 経由(gradio_client)で文字起こしする"""
+    pytest.importorskip("gradio")
+    gradio_client = pytest.importorskip("gradio_client")
+    import socket
+
+    from asrkit import pipeline
+
+    webui = _webui(tmp_path)
+    sess = _session()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    try:
+        webui.launch(sess, pipeline.Settings(preset="dummy", vad="energy", max_clip=20, batch_size=2), port=port)
+        c = gradio_client.Client(f"http://127.0.0.1:{port}/", verbose=False)
+        text, files, summary, logs = c.predict(gradio_client.handle_file(audio), None, "ダミー", "Japanese", "", False,
+                                               0, "", api_name="/run")
+        assert text.startswith("[00:00:0"), summary
+        assert len(files) >= 6
+        assert "倍速" in summary
+        assert "[6/6]" in logs
+    finally:
+        webui.stop()
+        sess.free()

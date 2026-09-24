@@ -98,17 +98,21 @@ PRESETS: List[Preset] = [
            gpu="T4〜(A100/H100 で真価)", license="Apache-2.0", note="中身は標準と同じモデル。大量バッチで数倍〜十数倍速い"),
     Preset("cohere-transcribe", "Cohere Transcribe 2B（別系統の有力候補）", "cohere", "hf",
            "CohereLabs/cohere-transcribe-03-2026", options={"batch_size": 16}, context=False, gpu="T4〜",
-           license="Apache-2.0", note="日本語 CER: FLEURS 2.89% / CV 20.2%(Qwen 5.28% / 26.3%)。HF で規約同意が必要"),
+           max_clip=15.0, max_gap=1.0, license="Apache-2.0",
+           note="日本語 CER: FLEURS 2.89% / CV 20.2%(Qwen 5.28% / 26.3%)。HF で規約同意が必要。"
+                "1クリップに何人ぶんも入ると発話を飛ばすので 15 秒・1 秒の無音で区切る(CV8 の CER 19%→4%)"),
     Preset("cohere-transcribe-vllm", "Cohere Transcribe 2B × vLLM", "vllm", "vllm", "CohereLabs/cohere-transcribe-03-2026",
-           context=False, gpu="T4〜(A100/H100 で真価)", license="Apache-2.0", note="Cohere を vLLM で高速に"),
+           max_clip=15.0, max_gap=1.0, context=False, gpu="T4〜(A100/H100 で真価)", license="Apache-2.0",
+           note="Cohere を vLLM で高速に(区切り方はふつう版と同じ)"),
     Preset("whisper-large-v3-turbo", "Whisper large-v3-turbo（faster-whisper）", "faster-whisper", "fw", "large-v3-turbo",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番。速い"),
     Preset("whisper-large-v3", "Whisper large-v3（faster-whisper）", "faster-whisper", "fw", "large-v3",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番の最高精度版"),
     Preset("kotoba-whisper-v2", "kotoba-whisper v2.0（日本語特化 Whisper）", "faster-whisper", "fw",
            "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False, "chunk_length": 15},
-           max_clip=15.0, license="MIT",
-           note="ReazonSpeech で学習した日本語特化の蒸留モデル。公式のおすすめどおり 15 秒ずつ読む"
+           max_clip=15.0, max_gap=1.0, license="MIT",
+           note="ReazonSpeech で学習した日本語特化の蒸留モデル。公式のおすすめどおり 15 秒ずつ読み、"
+                "1 秒の無音でも区切る(何人ぶんも入ると発話を飛ばすため。CV8 の CER 24%→8%)"
                 "(タイムスタンプはアライナーで付ける。faster-whisper の単語時刻はこのモデルだと segfault するため)"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
            options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
