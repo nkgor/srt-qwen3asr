@@ -575,7 +575,13 @@ class Session:
         t = time.time()
         segs = self.vad(w, wav_key, st, db)
         max_clip = min(float(st.max_clip), 170.0) if st.aligner else float(st.max_clip)
-        clips = core.build_clips(segs, w.duration, max_clip=max_clip, max_gap=st.max_gap, pad=st.vad_pad,
+        # 1クリップに何人ぶんも入っていると発話を飛ばすモデル(kotoba-whisper / Cohere)は短く・無音で区切る
+        max_gap = float(st.max_gap)
+        if p.max_clip:
+            max_clip = min(max_clip, float(p.max_clip))
+        if p.max_gap:
+            max_gap = min(max_gap, float(p.max_gap))
+        clips = core.build_clips(segs, w.duration, max_clip=max_clip, max_gap=max_gap, pad=st.vad_pad,
                                  overlap=st.overlap, db=db)
         T["vad"] = time.time() - t
         speech = sum(e - s for s, e in segs)
@@ -605,8 +611,10 @@ class Session:
         n_retry = sum(1 for r in results if len(r.attempts) > 1)
         n_flag = sum(1 for r in results if r.flags)
         if not quiet:
-            log(f"      → {len(results)} クリップ / 再推論 {n_retry} / 要確認 {n_flag} ({core.fmt_dur(T['asr'])},"
-                f" x{w.duration / max(T['asr'], 1e-6):.0f} 倍速)")
+            t_inf = asr_info.get("asr_sec") or T["asr"]  # モデルの読み込み・vLLM サーバーの起動は除く
+            log(f"      → {len(results)} クリップ / 再推論 {n_retry} / 要確認 {n_flag} (推論 {core.fmt_dur(t_inf)},"
+                f" x{w.duration / max(t_inf, 1e-6):.0f} 倍速"
+                + (f" / 読み込み {core.fmt_dur(asr_info['load_sec'])}" if asr_info.get("load_sec") else "") + ")")
 
         # 4.5) セカンドオピニオン(怪しいクリップだけ別モデルで)
         if st.second_opinion and n_flag:

@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 command -v uv >/dev/null || pip install -q uv
 [ -d .venv-v3 ] || uv venv -q -p 3.12 .venv-v3
-uv pip install -q --python .venv-v3/bin/python numpy pytest tqdm ipython pyarrow nbformat imageio-ffmpeg
+uv pip install -q --python .venv-v3/bin/python numpy pytest tqdm ipython pyarrow nbformat imageio-ffmpeg gradio gradio_client
 if ! command -v ffmpeg >/dev/null; then
   FF=$(.venv-v3/bin/python -c "import imageio_ffmpeg as i; print(i.get_ffmpeg_exe())")
   ln -sf "$FF" .venv-v3/bin/ffmpeg

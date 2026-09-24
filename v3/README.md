@@ -9,7 +9,17 @@
 2. **⓪ ライブラリの展開** → **① セットアップ** を実行（使うモデルにチェック）
 3. **② 音声とモデル** に音源のパス（空欄ならアップロード）と固有名詞を入れる。話者分離は **③**
 4. **⑤ 実行**（「ランタイム → すべてのセルを実行」でもOK）
-5. おまけ: **⑥ モデル比較** / **⑦ 議事録づくり** / **⑧ VRAM 解放**
+5. おまけ: **⑥ モデル比較** / **⑦ 議事録づくり** / **⑧ VRAM 解放** / **⑨ Web UI**
+
+### 画面でお手軽に（⑨ Web UI）
+
+**⓪ → ① → ⑨** の順に実行すると、セルの下に Gradio の画面が出ます。音声・動画をアップロード（またはマイクで録音）して、モデル・言語・固有名詞・話者分離を選んで「文字起こし」を押すだけです。
+結果はその場で表示されて、txt / srt / vtt / json / csv / md（話者分離ありなら rttm も）をダウンロードできます。
+
+- 選べるモデルは、① で環境を入れたものだけです
+- ⑤ を一度実行していれば、④ の細かい設定（VAD・区切り・置換など）を引き継ぎます
+- 出力は `/content/asr_v3/webui/日時_ファイル名/` にたまります。キャッシュも効くので、同じファイルをもう一度流すとすぐ終わります
+- `share` を ON にすると、だれでも開ける公開 URL（gradio.live・72時間）ができます。会議の音声をあつかうときは `password` も入れてください（ユーザー名は `asr`）
 
 出力（音源と同じフォルダ、または指定したフォルダ）:
 
@@ -47,9 +57,10 @@
 ### Colab 実機で確かめたこと（A100・2026年9月。くわしくは [test_reports/colab_e2e.md](test_reports/colab_e2e.md)）
 
 - 全モデルが動きました。Common Voice 8 をつないだテスト音声では Qwen3-ASR 1.7B（CER 8.8%）と Whisper large-v3-turbo（8.0%）がいちばんよく、vLLM 版は同じ精度で推論が 5〜6 倍速いです（サーバー起動に 1〜2 分）
-- Colab のカーネルが Python 3.13 になっているので、いまは flash-attn の whl が合わず sdpa で動きます
+- Colab のカーネルが Python 3.13 になっていたので、flash-attn は cp313 版の whl を入れます（コミュニティのビルド。入らなければ sdpa で動きます）
 - Cohere Transcribe は HF で規約に同意するまで 403 になります
-- kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます。長いクリップだと発話を飛ばしやすいです（Cohere も少し）
+- kotoba-whisper は faster-whisper の単語タイムスタンプで落ちるので、タイムスタンプはアライナーで付けます
+- kotoba-whisper と Cohere は、1つのクリップに何人ぶんも入ると発話を飛ばすので、プリセットで「15 秒・無音 1 秒」で短く区切ります（CER が kotoba 24%→8%、Cohere 19%→4%）
 
 ## v2 からの改善点
 
@@ -103,4 +114,5 @@ python tools/nb_run.py ../Qwen3-ASR_v3.ipynb overrides.json   # フォームに�
 - `asrkit/engines.py` … 各モデルのアダプタ（ワーカーの中で動く）
 - `asrkit/pipeline.py` … ノートブックから呼ぶ処理（文字起こし・比較・議事録）
 - `asrkit/presets.py` … モデルのプリセット（1行足せばプルダウンに出る）と venv の中身
+- `asrkit/webui.py` … ⑨ の Gradio 画面（処理は `Session.transcribe_file` をそのまま呼ぶだけ）
 - Colab 実機での通しテストは [COLAB_TEST.md](COLAB_TEST.md)

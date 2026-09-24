@@ -77,6 +77,8 @@ class Preset:
     punctuates: bool = True
     context: bool = True  # context(固有名詞のヒント)を使えるか
     native_ts: bool = False
+    max_clip: float = 0.0  # 1クリップの上限秒数(0 = 設定の max_clip のまま)。長いと途中の発話を飛ばすモデル用
+    max_gap: float = 0.0  # これより長い無音をはさむ発話は別クリップに(0 = 設定の max_gap のまま)。同上
     gpu: str = "T4〜"  # 目安
     license: str = ""
     note: str = ""
@@ -93,18 +95,19 @@ PRESETS: List[Preset] = [
     Preset("qwen3-1.7b-vllm", "Qwen3-ASR 1.7B × vLLM（A100/H100で爆速）", "vllm", "vllm", "Qwen/Qwen3-ASR-1.7B",
            gpu="T4〜(A100/H100 で真価)", license="Apache-2.0", note="中身は標準と同じモデル。大量バッチで数倍〜十数倍速い"),
     Preset("cohere-transcribe", "Cohere Transcribe 2B（別系統の有力候補）", "cohere", "hf",
-           "CohereLabs/cohere-transcribe-03-2026", options={"batch_size": 16}, context=False, gpu="T4〜",
-           license="Apache-2.0", note="日本語 CER: FLEURS 2.89% / CV 20.2%(Qwen 5.28% / 26.3%)。HF で規約同意が必要"),
+           "CohereLabs/cohere-transcribe-03-2026", options={"batch_size": 16}, max_clip=15, max_gap=1.0, context=False, gpu="T4〜",
+           license="Apache-2.0", note="日本語 CER: FLEURS 2.89% / CV 20.2%(Qwen 5.28% / 26.3%)。HF で規約同意が必要。"
+                                    "発話を飛ばさないよう 15秒・1秒の無音で短く区切る(CV8 の CER 19%→4%)"),
     Preset("cohere-transcribe-vllm", "Cohere Transcribe 2B × vLLM", "vllm", "vllm", "CohereLabs/cohere-transcribe-03-2026",
-           context=False, gpu="T4〜(A100/H100 で真価)", license="Apache-2.0", note="Cohere を vLLM で高速に"),
+           max_clip=15, max_gap=1.0, context=False, gpu="T4〜(A100/H100 で真価)", license="Apache-2.0", note="Cohere を vLLM で高速に"),
     Preset("whisper-large-v3-turbo", "Whisper large-v3-turbo（faster-whisper）", "faster-whisper", "fw", "large-v3-turbo",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番。速い"),
     Preset("whisper-large-v3", "Whisper large-v3（faster-whisper）", "faster-whisper", "fw", "large-v3",
            options={"beam_size": 5}, ja="○", native_ts=True, license="MIT", note="定番の最高精度版"),
     Preset("kotoba-whisper-v2", "kotoba-whisper v2.0（日本語特化 Whisper）", "faster-whisper", "fw",
-           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False}, license="MIT",
-           note="ReazonSpeech で学習した日本語特化の蒸留モデル(タイムスタンプはアライナーで付ける。"
-                "faster-whisper の単語時刻はこのモデルだと segfault するため)"),
+           "kotoba-tech/kotoba-whisper-v2.0-faster", options={"beam_size": 5, "word_timestamps": False}, max_clip=15, max_gap=1.0, license="MIT",
+           note="ReazonSpeech で学習した日本語特化の蒸留モデル。1クリップに何人ぶんも入ると発話を飛ばすので、"
+                "15秒・1秒の無音で短く区切る(CV8 の CER 24%→8%)。タイムスタンプはアライナーで付ける"),
     Preset("parakeet-ja", "Parakeet TDT-CTC 0.6B ja（NVIDIA・日本語特化）", "nemo", "nemo", "nvidia/parakeet-tdt_ctc-0.6b-ja",
            options={"batch_size": 16}, context=False, native_ts=True, punctuates=False, license="CC-BY-4.0",
            note="とても速い日本語専用モデル(JSUT の CER 6.60% の報告)。句読点は少なめ"),
@@ -121,6 +124,9 @@ PRESETS: List[Preset] = [
 FLASH_WHEELS: Dict[tuple, str] = {
     ("2.11", "cp312"): "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/"
                        "flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    # 2026年9月の Colab はカーネルが Python 3.13(torch 2.11.0+cu128)。同じリリースの cp313 版
+    ("2.11", "cp313"): "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/"
+                       "flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
 }
 
 
